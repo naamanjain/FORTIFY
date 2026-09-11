@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fortify.local/schema/deployment_event_schema.json",
+  "title": "deployment_event",
+  "description": "Synthetic deployment interval",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "deployment_event_id": {
+      "type": "string",
+      "description": "Unique deployment identifier"
+    },
+    "person_id": {
+      "type": "string",
+      "description": "Personnel foreign key"
+    },
+    "deployment_type": {
+      "type": "string",
+      "description": "Synthetic deployment type"
+    },
+    "start_date": {
+      "type": "string",
+      "description": "Deployment start",
+      "format": "date"
+    },
+    "end_date": {
+      "type": "string",
+      "description": "Deployment end",
+      "format": "date"
+    },
+    "intensity_level": {
+      "type": "integer",
+      "description": "Deployment intensity 1\u20135"
+    },
+    "location_type": {
+      "type": "string",
+      "description": "Synthetic location category"
+    }
+  },
+  "required": [
+    "deployment_event_id",
+    "person_id",
+    "deployment_type",
+    "start_date",
+    "end_date",
+    "intensity_level",
+    "location_type"
+  ]
+}

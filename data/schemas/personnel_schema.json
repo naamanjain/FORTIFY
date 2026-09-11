@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fortify.local/schema/personnel_schema.json",
+  "title": "personnel",
+  "description": "Synthetic personnel master data",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "person_id": {
+      "type": "string",
+      "description": "Synthetic personnel identifier"
+    },
+    "unit_id": {
+      "type": "string",
+      "description": "Synthetic unit identifier"
+    },
+    "role": {
+      "type": "string",
+      "description": "Operational role"
+    },
+    "deployment_type": {
+      "type": "string",
+      "description": "Primary synthetic deployment/unit type"
+    },
+    "service_years": {
+      "type": "integer",
+      "description": "Synthetic completed service years"
+    },
+    "joining_date": {
+      "type": "string",
+      "description": "Synthetic joining date",
+      "format": "date"
+    },
+    "current_posting_start": {
+      "type": "string",
+      "description": "Synthetic current posting start date",
+      "format": "date"
+    }
+  },
+  "required": [
+    "person_id",
+    "unit_id",
+    "role",
+    "deployment_type",
+    "service_years",
+    "joining_date",
+    "current_posting_start"
+  ]
+}
