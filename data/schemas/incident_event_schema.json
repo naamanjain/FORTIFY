@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fortify.local/schema/incident_event_schema.json",
+  "title": "incident_event",
+  "description": "Synthetic operational incident",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "incident_event_id": {
+      "type": "string",
+      "description": "Unique incident identifier"
+    },
+    "person_id": {
+      "type": "string",
+      "description": "Personnel foreign key"
+    },
+    "date": {
+      "type": "string",
+      "description": "Incident date",
+      "format": "date"
+    },
+    "incident_type": {
+      "type": "string",
+      "description": "Synthetic incident category"
+    },
+    "intensity_level": {
+      "type": "integer",
+      "description": "Incident intensity 1\u20135"
+    },
+    "recovery_requirement": {
+      "type": "number",
+      "description": "Synthetic recovery requirement, 1\u20138 hours"
+    }
+  },
+  "required": [
+    "incident_event_id",
+    "person_id",
+    "date",
+    "incident_type",
+    "intensity_level",
+    "recovery_requirement"
+  ]
+}

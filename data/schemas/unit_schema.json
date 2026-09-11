@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fortify.local/schema/unit_schema.json",
+  "title": "unit",
+  "description": "Synthetic unit configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "unit_id": {
+      "type": "string",
+      "description": "Synthetic unit identifier"
+    },
+    "unit_type": {
+      "type": "string",
+      "description": "Synthetic unit type"
+    },
+    "unit_name": {
+      "type": "string",
+      "description": "Synthetic descriptive unit name"
+    },
+    "night_duty_probability": {
+      "type": "number",
+      "description": "Configured probability used by generator"
+    },
+    "typical_duty_hours": {
+      "type": "number",
+      "description": "Synthetic typical duty duration"
+    },
+    "typical_intensity_level": {
+      "type": "number",
+      "description": "Synthetic typical intensity level"
+    },
+    "incident_probability": {
+      "type": "number",
+      "description": "Configured incident-generation probability"
+    },
+    "deployment_probability": {
+      "type": "number",
+      "description": "Configured deployment-generation probability"
+    },
+    "training_probability": {
+      "type": "number",
+      "description": "Configured training-generation probability"
+    },
+    "operational_assumption": {
+      "type": "string",
+      "description": "Documented synthetic generation assumption"
+    }
+  },
+  "required": [
+    "unit_id",
+    "unit_type",
+    "unit_name",
+    "night_duty_probability",
+    "typical_duty_hours",
+    "typical_intensity_level",
+    "incident_probability",
+    "deployment_probability",
+    "training_probability",
+    "operational_assumption"
+  ]
+}

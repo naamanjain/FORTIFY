@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fortify.local/schema/training_event_schema.json",
+  "title": "training_event",
+  "description": "Training event",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "training_event_id": {
+      "type": "string",
+      "description": "Unique training identifier"
+    },
+    "person_id": {
+      "type": "string",
+      "description": "Personnel foreign key"
+    },
+    "date": {
+      "type": "string",
+      "description": "Training date",
+      "format": "date"
+    },
+    "duration_hours": {
+      "type": "number",
+      "description": "Training duration, 2\u20138 hours"
+    },
+    "training_type": {
+      "type": "string",
+      "description": "Training category"
+    },
+    "intensity_level": {
+      "type": "integer",
+      "description": "Training intensity 1\u20135"
+    }
+  },
+  "required": [
+    "training_event_id",
+    "person_id",
+    "date",
+    "duration_hours",
+    "training_type",
+    "intensity_level"
+  ]
+}

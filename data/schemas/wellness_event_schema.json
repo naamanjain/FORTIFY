@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fortify.local/schema/wellness_event_schema.json",
+  "title": "wellness_event",
+  "description": "Optional voluntary wellness observation",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "wellness_event_id": {
+      "type": "string",
+      "description": "Unique wellness event identifier"
+    },
+    "person_id": {
+      "type": "string",
+      "description": "Personnel foreign key"
+    },
+    "date": {
+      "type": "string",
+      "description": "Observation date",
+      "format": "date"
+    },
+    "mood_score": {
+      "type": "integer",
+      "description": "Voluntary score 1\u20135"
+    },
+    "energy_score": {
+      "type": "integer",
+      "description": "Voluntary score 1\u20135"
+    },
+    "sleep_quality": {
+      "type": "integer",
+      "description": "Voluntary score 1\u20135"
+    },
+    "perceived_stress": {
+      "type": "integer",
+      "description": "Voluntary self-report score 1\u20135; not a diagnosis"
+    },
+    "workload_manageability": {
+      "type": "integer",
+      "description": "Voluntary self-report score 1\u20135"
+    },
+    "support_request": {
+      "type": "boolean",
+      "description": "Whether voluntary support was requested"
+    }
+  },
+  "required": [
+    "wellness_event_id",
+    "person_id",
+    "date",
+    "mood_score",
+    "energy_score",
+    "sleep_quality",
+    "perceived_stress",
+    "workload_manageability",
+    "support_request"
+  ]
+}

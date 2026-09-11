@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fortify.local/schema/recovery_event_schema.json",
+  "title": "recovery_event",
+  "description": "Operational recovery/rest event",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "recovery_event_id": {
+      "type": "string",
+      "description": "Unique recovery event identifier"
+    },
+    "person_id": {
+      "type": "string",
+      "description": "Personnel foreign key"
+    },
+    "date": {
+      "type": "string",
+      "description": "Simulation date",
+      "format": "date"
+    },
+    "rest_duration_hours": {
+      "type": "number",
+      "description": "Rest duration, 4\u201314 hours"
+    }
+  },
+  "required": [
+    "recovery_event_id",
+    "person_id",
+    "date",
+    "rest_duration_hours"
+  ]
+}

@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fortify.local/schema/leave_event_schema.json",
+  "title": "leave_event",
+  "description": "Leave interval",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "leave_event_id": {
+      "type": "string",
+      "description": "Unique leave event identifier"
+    },
+    "person_id": {
+      "type": "string",
+      "description": "Personnel foreign key"
+    },
+    "start_date": {
+      "type": "string",
+      "description": "Leave start",
+      "format": "date"
+    },
+    "end_date": {
+      "type": "string",
+      "description": "Leave end",
+      "format": "date"
+    },
+    "duration_days": {
+      "type": "integer",
+      "description": "Inclusive duration, 3\u201314 days"
+    },
+    "leave_type": {
+      "type": "string",
+      "description": "Synthetic leave category"
+    },
+    "status": {
+      "type": "string",
+      "description": "Leave status"
+    }
+  },
+  "required": [
+    "leave_event_id",
+    "person_id",
+    "start_date",
+    "end_date",
+    "duration_days",
+    "leave_type",
+    "status"
+  ]
+}
