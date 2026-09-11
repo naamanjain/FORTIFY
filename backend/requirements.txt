@@ -1,0 +1,11 @@
+fastapi>=0.115,<1
+uvicorn[standard]>=0.34,<1
+pydantic>=2.10,<3
+pandas>=2.2,<3
+numpy>=2.0,<3
+scikit-learn>=1.6,<2
+scipy>=1.14,<2
+cryptography>=44,<47
+PyJWT>=2.10,<3
+pytest>=8.3,<9
+httpx>=0.28,<1
