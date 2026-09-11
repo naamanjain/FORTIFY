@@ -1,0 +1,7 @@
+export type RiskBand='LOW'|'MODERATE'|'HIGH'
+export type FeasibilityStatus='FEASIBLE'|'FEASIBLE_WITH_ADJUSTMENT'|'CONSTRAINED'|'NOT_FEASIBLE'
+export type DashboardCase={person_id:string;date:string;risk_probability:number;risk_band:RiskBand;recommended_action:string;priority:string;feasibility_status:FeasibilityStatus;requires_human_review:boolean}
+export type DashboardOverview={phase:string;as_of_date:string;personnel_count:number;risk_band_counts:Record<string,number>;feasibility_counts:Record<string,number>;priority_counts:Record<string,number>;high_priority_cases:DashboardCase[];data_policy:string}
+export type TrendPoint={date:string;average_probability:number;high_count:number;constrained_count:number;human_review_count:number}
+export type UnitSummary={unit_id:string;personnel:number;high_risk:number;constrained:number;human_review:number}
+export type PersonDetail={person_id:string;unit_id?:string;role?:string;deployment_type?:string;date_range:[string,string];latest:{date:string;risk_probability:number;risk_band:RiskBand;threshold_decision:string;recommended_action:string;priority:string;feasibility_status:FeasibilityStatus;constraint_flags:string;requires_human_review:boolean;contributing_operational_signals?:string;adjustment_recommendation?:string};history:Array<{date:string;risk_probability:number;risk_band:RiskBand;feasibility_status:FeasibilityStatus}>;workflow?:any;privacy_note:string}
