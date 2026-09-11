@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fortify.local/schema/duty_event_schema.json",
+  "title": "duty_event",
+  "description": "Operational duty event",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "duty_event_id": {
+      "type": "string",
+      "description": "Unique duty event identifier"
+    },
+    "person_id": {
+      "type": "string",
+      "description": "Personnel foreign key"
+    },
+    "timestamp": {
+      "type": "string",
+      "description": "ISO timestamp for duty event"
+    },
+    "date": {
+      "type": "string",
+      "description": "Simulation date",
+      "format": "date"
+    },
+    "duty_type": {
+      "type": "string",
+      "description": "Duty category"
+    },
+    "duration_hours": {
+      "type": "number",
+      "description": "Duty duration, 4\u201314 hours"
+    },
+    "night_shift": {
+      "type": "boolean",
+      "description": "Whether this is a night shift"
+    },
+    "intensity_level": {
+      "type": "integer",
+      "description": "Finite operational intensity scale 1\u20135"
+    },
+    "deployment_id": {
+      "type": "string",
+      "description": "Deployment foreign key; blank when not deployed"
+    }
+  },
+  "required": [
+    "duty_event_id",
+    "person_id",
+    "timestamp",
+    "date",
+    "duty_type",
+    "duration_hours",
+    "night_shift",
+    "intensity_level",
+    "deployment_id"
+  ]
+}

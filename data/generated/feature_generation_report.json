@@ -1,0 +1,19 @@
+{
+  "rows": 90000,
+  "personnel": 500,
+  "start_date": "2026-01-01",
+  "end_date": "2026-06-29",
+  "feature_count": 104,
+  "config": {
+    "short_rest_threshold_hours": 6.0,
+    "recovery_target_hours": 8.0,
+    "high_intensity_threshold": 4,
+    "emergency_duty_types": [
+      "EMERGENCY"
+    ],
+    "support_recent_window_days": 7,
+    "min_history_for_std": 2
+  },
+  "phase": "Phase 2 \u2014 Feature Engineering",
+  "note": "No model training, risk score, diagnosis, recommendation, or optimization is performed."
+}

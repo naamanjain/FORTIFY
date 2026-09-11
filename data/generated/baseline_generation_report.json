@@ -1,0 +1,24 @@
+{
+  "rows": 90000,
+  "columns": 251,
+  "new_columns": 145,
+  "date_min": "2026-01-01 00:00:00",
+  "date_max": "2026-06-29 00:00:00",
+  "config": {
+    "minimum_personal_history_days": 14,
+    "minimum_cohort_size": 10,
+    "minimum_operational_size": 10,
+    "near_zero_denominator": 1e-09,
+    "feature_metrics": [
+      "duty_hours_7d",
+      "duty_hours_30d",
+      "night_shifts_30d",
+      "duty_density_30d",
+      "avg_rest_7d",
+      "min_rest_7d",
+      "training_hours_30d",
+      "incident_count_30d"
+    ]
+  },
+  "forbidden_columns_present": []
+}

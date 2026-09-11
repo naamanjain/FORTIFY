@@ -1,0 +1,45 @@
+{
+  "phase": 6,
+  "status": "complete",
+  "rows": 90000,
+  "unique_persons": 500,
+  "risk_band_counts": {
+    "HIGH": 35758,
+    "MODERATE": 28687,
+    "LOW": 25555
+  },
+  "action_counts": {
+    "CONTINUE_EXISTING_SUPPORT": 78529,
+    "RECOVERY_SUPPORT": 3643,
+    "PRIORITY_WELFARE_REVIEW": 3448,
+    "ROUTINE_MONITORING": 1973,
+    "SUPERVISOR_WELFARE_REVIEW": 1931,
+    "WELLNESS_CHECK_IN": 476
+  },
+  "human_review_count": 64445,
+  "policy": {
+    "policy_version": "phase6-v1",
+    "cooldown_consecutive_days": 1,
+    "material_probability_increase": 0.1,
+    "recovery_hours_reference": 8.0,
+    "low_action": "ROUTINE_MONITORING",
+    "moderate_recovery_action": "RECOVERY_SUPPORT",
+    "moderate_checkin_action": "WELLNESS_CHECK_IN",
+    "moderate_supervisor_action": "SUPERVISOR_WELFARE_REVIEW",
+    "high_action": "PRIORITY_WELFARE_REVIEW",
+    "low_priority": "LOW",
+    "moderate_priority": "MEDIUM",
+    "high_priority": "HIGH",
+    "low_requires_human_review": false,
+    "moderate_requires_human_review": true,
+    "high_requires_human_review": true,
+    "continue_action": "CONTINUE_EXISTING_SUPPORT"
+  },
+  "safety": {
+    "synthetic_data": true,
+    "medical_diagnosis": false,
+    "disciplinary_action": false,
+    "autonomous_execution": false,
+    "human_oversight_required_for_review": true
+  }
+}

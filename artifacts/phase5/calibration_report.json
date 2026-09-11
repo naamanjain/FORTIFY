@@ -1,0 +1,153 @@
+{
+  "test": {
+    "average_precision": 0.5790957834643197,
+    "bins": [
+      {
+        "absolute_gap": 0.031271634539389415,
+        "bin": 1,
+        "count": 2164,
+        "lower": 0.1,
+        "mean_predicted_probability": 0.16574483232127482,
+        "observed_positive_rate": 0.1344731977818854,
+        "upper": 0.2
+      },
+      {
+        "absolute_gap": 0.16735217512470446,
+        "bin": 2,
+        "count": 1286,
+        "lower": 0.2,
+        "mean_predicted_probability": 0.24477846251137642,
+        "observed_positive_rate": 0.4121306376360809,
+        "upper": 0.30000000000000004
+      },
+      {
+        "absolute_gap": 0.23106164443254323,
+        "bin": 3,
+        "count": 707,
+        "lower": 0.30000000000000004,
+        "mean_predicted_probability": 0.3488534899380367,
+        "observed_positive_rate": 0.57991513437058,
+        "upper": 0.4
+      },
+      {
+        "absolute_gap": 0.08772982578003824,
+        "bin": 4,
+        "count": 505,
+        "lower": 0.4,
+        "mean_predicted_probability": 0.44692363956649644,
+        "observed_positive_rate": 0.5346534653465347,
+        "upper": 0.5
+      },
+      {
+        "absolute_gap": 0.08130077622187348,
+        "bin": 5,
+        "count": 276,
+        "lower": 0.5,
+        "mean_predicted_probability": 0.5455108179810251,
+        "observed_positive_rate": 0.6268115942028986,
+        "upper": 0.6000000000000001
+      },
+      {
+        "absolute_gap": 0.03405880966191155,
+        "bin": 6,
+        "count": 114,
+        "lower": 0.6000000000000001,
+        "mean_predicted_probability": 0.6413797868293165,
+        "observed_positive_rate": 0.6754385964912281,
+        "upper": 0.7000000000000001
+      },
+      {
+        "absolute_gap": 0.005816780497886143,
+        "bin": 7,
+        "count": 46,
+        "lower": 0.7000000000000001,
+        "mean_predicted_probability": 0.7333136542847225,
+        "observed_positive_rate": 0.7391304347826086,
+        "upper": 0.8
+      }
+    ],
+    "brier_score": 0.20248688318076583,
+    "expected_calibration_error": 0.10143980961709176,
+    "roc_auc": 0.7634006092627211
+  },
+  "validation": {
+    "average_precision": 0.5514581625678077,
+    "bins": [
+      {
+        "absolute_gap": 0.10259870591270838,
+        "bin": 1,
+        "count": 1536,
+        "lower": 0.1,
+        "mean_predicted_probability": 0.1703070392460417,
+        "observed_positive_rate": 0.06770833333333333,
+        "upper": 0.2
+      },
+      {
+        "absolute_gap": 0.1216646945958251,
+        "bin": 2,
+        "count": 1071,
+        "lower": 0.2,
+        "mean_predicted_probability": 0.24714949774777903,
+        "observed_positive_rate": 0.36881419234360413,
+        "upper": 0.30000000000000004
+      },
+      {
+        "absolute_gap": 0.08230073050326886,
+        "bin": 3,
+        "count": 813,
+        "lower": 0.30000000000000004,
+        "mean_predicted_probability": 0.34820357453978157,
+        "observed_positive_rate": 0.43050430504305043,
+        "upper": 0.4
+      },
+      {
+        "absolute_gap": 0.01203166484588264,
+        "bin": 4,
+        "count": 627,
+        "lower": 0.4,
+        "mean_predicted_probability": 0.4520831676900025,
+        "observed_positive_rate": 0.46411483253588515,
+        "upper": 0.5
+      },
+      {
+        "absolute_gap": 0.02124321631040349,
+        "bin": 5,
+        "count": 547,
+        "lower": 0.5,
+        "mean_predicted_probability": 0.5473125423733259,
+        "observed_positive_rate": 0.5685557586837294,
+        "upper": 0.6000000000000001
+      },
+      {
+        "absolute_gap": 0.026321399216553965,
+        "bin": 6,
+        "count": 463,
+        "lower": 0.6000000000000001,
+        "mean_predicted_probability": 0.6461918095837246,
+        "observed_positive_rate": 0.6198704103671706,
+        "upper": 0.7000000000000001
+      },
+      {
+        "absolute_gap": 0.16082957524175445,
+        "bin": 7,
+        "count": 239,
+        "lower": 0.7000000000000001,
+        "mean_predicted_probability": 0.7424195334007503,
+        "observed_positive_rate": 0.5815899581589958,
+        "upper": 0.8
+      },
+      {
+        "absolute_gap": 0.2695775121487416,
+        "bin": 8,
+        "count": 29,
+        "lower": 0.8,
+        "mean_predicted_probability": 0.8213016500797761,
+        "observed_positive_rate": 0.5517241379310345,
+        "upper": 0.9
+      }
+    ],
+    "brier_score": 0.19697164306889062,
+    "expected_calibration_error": 0.0812040772668024,
+    "roc_auc": 0.7457498919464054
+  }
+}

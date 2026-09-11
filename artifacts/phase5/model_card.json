@@ -1,0 +1,277 @@
+{
+  "calibration": {
+    "method": "Platt scaling fitted on validation predictions only",
+    "test": {
+      "average_precision": 0.5790957834643197,
+      "bins": [
+        {
+          "absolute_gap": 0.031271634539389415,
+          "bin": 1,
+          "count": 2164,
+          "lower": 0.1,
+          "mean_predicted_probability": 0.16574483232127482,
+          "observed_positive_rate": 0.1344731977818854,
+          "upper": 0.2
+        },
+        {
+          "absolute_gap": 0.16735217512470446,
+          "bin": 2,
+          "count": 1286,
+          "lower": 0.2,
+          "mean_predicted_probability": 0.24477846251137642,
+          "observed_positive_rate": 0.4121306376360809,
+          "upper": 0.30000000000000004
+        },
+        {
+          "absolute_gap": 0.23106164443254323,
+          "bin": 3,
+          "count": 707,
+          "lower": 0.30000000000000004,
+          "mean_predicted_probability": 0.3488534899380367,
+          "observed_positive_rate": 0.57991513437058,
+          "upper": 0.4
+        },
+        {
+          "absolute_gap": 0.08772982578003824,
+          "bin": 4,
+          "count": 505,
+          "lower": 0.4,
+          "mean_predicted_probability": 0.44692363956649644,
+          "observed_positive_rate": 0.5346534653465347,
+          "upper": 0.5
+        },
+        {
+          "absolute_gap": 0.08130077622187348,
+          "bin": 5,
+          "count": 276,
+          "lower": 0.5,
+          "mean_predicted_probability": 0.5455108179810251,
+          "observed_positive_rate": 0.6268115942028986,
+          "upper": 0.6000000000000001
+        },
+        {
+          "absolute_gap": 0.03405880966191155,
+          "bin": 6,
+          "count": 114,
+          "lower": 0.6000000000000001,
+          "mean_predicted_probability": 0.6413797868293165,
+          "observed_positive_rate": 0.6754385964912281,
+          "upper": 0.7000000000000001
+        },
+        {
+          "absolute_gap": 0.005816780497886143,
+          "bin": 7,
+          "count": 46,
+          "lower": 0.7000000000000001,
+          "mean_predicted_probability": 0.7333136542847225,
+          "observed_positive_rate": 0.7391304347826086,
+          "upper": 0.8
+        }
+      ],
+      "brier_score": 0.20248688318076583,
+      "expected_calibration_error": 0.10143980961709176,
+      "roc_auc": 0.7634006092627211
+    },
+    "test_not_used_for_calibration": true,
+    "validation": {
+      "average_precision": 0.5514581625678077,
+      "bins": [
+        {
+          "absolute_gap": 0.10259870591270838,
+          "bin": 1,
+          "count": 1536,
+          "lower": 0.1,
+          "mean_predicted_probability": 0.1703070392460417,
+          "observed_positive_rate": 0.06770833333333333,
+          "upper": 0.2
+        },
+        {
+          "absolute_gap": 0.1216646945958251,
+          "bin": 2,
+          "count": 1071,
+          "lower": 0.2,
+          "mean_predicted_probability": 0.24714949774777903,
+          "observed_positive_rate": 0.36881419234360413,
+          "upper": 0.30000000000000004
+        },
+        {
+          "absolute_gap": 0.08230073050326886,
+          "bin": 3,
+          "count": 813,
+          "lower": 0.30000000000000004,
+          "mean_predicted_probability": 0.34820357453978157,
+          "observed_positive_rate": 0.43050430504305043,
+          "upper": 0.4
+        },
+        {
+          "absolute_gap": 0.01203166484588264,
+          "bin": 4,
+          "count": 627,
+          "lower": 0.4,
+          "mean_predicted_probability": 0.4520831676900025,
+          "observed_positive_rate": 0.46411483253588515,
+          "upper": 0.5
+        },
+        {
+          "absolute_gap": 0.02124321631040349,
+          "bin": 5,
+          "count": 547,
+          "lower": 0.5,
+          "mean_predicted_probability": 0.5473125423733259,
+          "observed_positive_rate": 0.5685557586837294,
+          "upper": 0.6000000000000001
+        },
+        {
+          "absolute_gap": 0.026321399216553965,
+          "bin": 6,
+          "count": 463,
+          "lower": 0.6000000000000001,
+          "mean_predicted_probability": 0.6461918095837246,
+          "observed_positive_rate": 0.6198704103671706,
+          "upper": 0.7000000000000001
+        },
+        {
+          "absolute_gap": 0.16082957524175445,
+          "bin": 7,
+          "count": 239,
+          "lower": 0.7000000000000001,
+          "mean_predicted_probability": 0.7424195334007503,
+          "observed_positive_rate": 0.5815899581589958,
+          "upper": 0.8
+        },
+        {
+          "absolute_gap": 0.2695775121487416,
+          "bin": 8,
+          "count": 29,
+          "lower": 0.8,
+          "mean_predicted_probability": 0.8213016500797761,
+          "observed_positive_rate": 0.5517241379310345,
+          "upper": 0.9
+        }
+      ],
+      "brier_score": 0.19697164306889062,
+      "expected_calibration_error": 0.0812040772668024,
+      "roc_auc": 0.7457498919464054
+    }
+  },
+  "data": {
+    "excluded_unlabeled_rows": 63915,
+    "rows": 90000,
+    "splits": {
+      "test": {
+        "date_end": "2026-06-28",
+        "date_start": "2026-05-24",
+        "negative_count": 3313,
+        "positive_count": 1785,
+        "positive_rate": 0.35013730874852883,
+        "rows": 5098
+      },
+      "train": {
+        "date_end": "2026-04-17",
+        "date_start": "2026-01-01",
+        "negative_count": 8540,
+        "positive_count": 7122,
+        "positive_rate": 0.45473119652662497,
+        "rows": 15662
+      },
+      "validation": {
+        "date_end": "2026-05-23",
+        "date_start": "2026-04-18",
+        "negative_count": 3432,
+        "positive_count": 1893,
+        "positive_rate": 0.3554929577464789,
+        "rows": 5325
+      }
+    },
+    "usable_labeled_samples": 26085,
+    "wellness_predictors_excluded": true
+  },
+  "limitations": [
+    "The target is a synthetic voluntary self-report observation and is not clinical ground truth.",
+    "Many person-days are excluded from supervised evaluation because no future voluntary wellness observation exists in the target horizon.",
+    "Thresholds are prototype operating conventions selected from validation data and require real-world policy review before operational use.",
+    "Calibration is assessed on temporally held-out data but has not been externally validated.",
+    "Operational contributors are associations from model inputs and must not be described as individual causal explanations."
+  ],
+  "model_identity": {
+    "base_model": "logistic_regression",
+    "base_model_phase": 4,
+    "model_features": 218,
+    "phase5_model_version": "phase5-v1",
+    "probability_layer": "validation-fitted Platt calibration applied to Phase 4 probabilities"
+  },
+  "phase": 5,
+  "risk_bands": {
+    "HIGH": "probability >= 0.5",
+    "LOW": "probability < 0.25",
+    "MODERATE": "0.25 <= probability < 0.5",
+    "interpretation": "Operational/welfare monitoring signals only; not clinical diagnoses."
+  },
+  "safety_privacy": {
+    "disciplinary_recommendation": false,
+    "medical_diagnosis": false,
+    "purpose": "early-support/welfare monitoring decision support",
+    "raw_wellness_values_in_prediction_output": false,
+    "synthetic_data": true
+  },
+  "status": "complete",
+  "target": {
+    "definition": "Any observed perceived_stress_latest >= 4 during T+1..T+7",
+    "horizon_days": 7,
+    "name": "future_high_perceived_stress_7d",
+    "source": "synthetic voluntary wellness self-report"
+  },
+  "threshold_selection": {
+    "candidate_thresholds": [
+      0.1,
+      0.15,
+      0.2,
+      0.25,
+      0.3,
+      0.35,
+      0.4,
+      0.45,
+      0.5,
+      0.55,
+      0.6
+    ],
+    "rationale": "Early-warning operation prioritizes sensitivity while retaining a validation-supported precision/F1 trade-off. The prior 0.50 operating point had low recall and is not retained as the Phase 5 decision threshold.",
+    "selected_threshold": 0.25,
+    "selection": {
+      "minimum_validation_recall": 0.8,
+      "rule": "Select the candidate threshold with the highest validation F1 among thresholds meeting the configured validation recall floor; break ties using precision, then lower threshold.",
+      "selected_threshold": 0.25
+    },
+    "test_labels_not_used_for_selection": true,
+    "test_operating_point": {
+      "f1": 0.6028636021100227,
+      "false_negative": 585.0,
+      "false_negative_rate": 0.3277310924369748,
+      "false_positive": 996.0,
+      "false_positive_rate": 0.3006338665861757,
+      "precision": 0.546448087431694,
+      "predicted_positive_count": 2196.0,
+      "predicted_positive_rate": 0.430757159670459,
+      "recall": 0.6722689075630253,
+      "specificity": 0.6993661334138244,
+      "threshold": 0.25,
+      "true_negative": 2317.0,
+      "true_positive": 1200.0
+    },
+    "validation_operating_point": {
+      "f1": 0.6362210897687182,
+      "false_negative": 270.0,
+      "false_negative_rate": 0.14263074484944532,
+      "false_positive": 1586.0,
+      "false_positive_rate": 0.4621212121212121,
+      "precision": 0.5057650358367093,
+      "predicted_positive_count": 3209.0,
+      "predicted_positive_rate": 0.6026291079812206,
+      "recall": 0.8573692551505546,
+      "specificity": 0.5378787878787878,
+      "threshold": 0.25,
+      "true_negative": 1846.0,
+      "true_positive": 1623.0
+    }
+  }
+}

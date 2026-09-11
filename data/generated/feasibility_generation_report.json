@@ -1,0 +1,27 @@
+{
+  "phase": 7,
+  "status": "complete",
+  "rows": 90000,
+  "unique_persons": 500,
+  "feasibility_status_counts": {
+    "CONSTRAINED": 31657,
+    "FEASIBLE": 29642,
+    "FEASIBLE_WITH_ADJUSTMENT": 28701
+  },
+  "constraint_flag_counts": {
+    "active_deployment": 19471,
+    "active_duty_conflict": 82166,
+    "excessive_recent_workload": 37094,
+    "insufficient_recovery_opportunity": 24056,
+    "leave_conflict": 7834,
+    "training_conflict": 7209,
+    "unit_operational_pressure": 9000
+  },
+  "policy_version": "phase7-v1",
+  "safety": {
+    "medical_diagnosis": false,
+    "disciplinary_action": false,
+    "automatic_adverse_action": false,
+    "human_oversight": true
+  }
+}
