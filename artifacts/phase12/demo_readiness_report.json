@@ -1,0 +1,23 @@
+{
+  "phase": "Phase 12 \u2014 Final Demonstration Preparation",
+  "status": "PASS",
+  "source_rows": 90000,
+  "source_personnel": 500,
+  "date_range": [
+    "2026-01-01",
+    "2026-06-29"
+  ],
+  "hero_case": {
+    "person_id": "P-0002",
+    "date": "2026-02-25"
+  },
+  "timeline_rows": 22,
+  "artifacts": [
+    "artifacts/phase12/demo_case_timeline.csv",
+    "artifacts/phase12/demo_manifest.json"
+  ],
+  "privacy_check": "PASS",
+  "deterministic_selection": true,
+  "workflow_state_mutated": false,
+  "synthetic_data": true
+}

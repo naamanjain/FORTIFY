@@ -1,0 +1,31 @@
+{
+  "phase": "Phase 12 \u2014 Final Demonstration Preparation",
+  "synthetic_demo_only": true,
+  "selection_policy": "Largest 21-day increase in model probability ending HIGH with PRIORITY_WELFARE_REVIEW and at least two feasibility constraint flags; deterministic tie-breakers by person_id/date.",
+  "hero_case": {
+    "person_id": "P-0002",
+    "target_date": "2026-02-25",
+    "probability": 0.882053,
+    "risk_band": "HIGH",
+    "recommended_action": "PRIORITY_WELFARE_REVIEW",
+    "priority": "HIGH",
+    "feasibility_status": "CONSTRAINED",
+    "constraint_flags": [
+      "active_duty_conflict",
+      "training_conflict",
+      "unit_operational_pressure"
+    ],
+    "workflow_state_at_preparation": "NEW",
+    "risk_probability_increase_over_21_days": 0.7175
+  },
+  "demo_flow": [
+    "Observe recent person-day risk trajectory.",
+    "Contextualize the target day using existing operational contributing signals and feasibility constraints.",
+    "Show the Phase 5 welfare-risk probability and LOW/MODERATE/HIGH interpretation.",
+    "Show the Phase 6 welfare-support recommendation and Phase 7 feasibility result.",
+    "Use the Phase 10 workflow panel to acknowledge and review the recommendation as an authorized human operator.",
+    "Record supported workflow transitions and show the audit/history indicator."
+  ],
+  "safety_boundary": "Operational/welfare decision support only; synthetic demonstration data; no medical diagnosis, disciplinary action, or autonomous personnel action.",
+  "raw_wellness_in_outputs": false
+}
