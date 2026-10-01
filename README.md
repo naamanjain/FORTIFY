@@ -455,6 +455,7 @@ Docker daemon.
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Locked stack, layers, repository layout |
 | [DECISIONS.md](DECISIONS.md) | Architecture decision records |
 | [SECURITY_MODEL.md](SECURITY_MODEL.md) | Roles, purposes, audit chain, prototype vs production |
+| [docs/POSTGRES_MIGRATION.md](docs/POSTGRES_MIGRATION.md) | SQLite→PostgreSQL path: what changes, what is verified, what is not claimed |
 | [ROADMAP.md](ROADMAP.md) | Phase sequence and completion status |
 | [TODO.md](TODO.md) | Remaining limitations |
 | [DEMO_SCENARIO.md](DEMO_SCENARIO.md) | Demonstration storyline |
