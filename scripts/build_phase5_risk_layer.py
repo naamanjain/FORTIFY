@@ -158,6 +158,7 @@ def main() -> int:
 
     model_card = {
         "phase": 5,
+        "pipeline": {"pipeline_version": "pipeline-v2-latent-aware", "alert_policy_version": "alert-policy-v1"},
         "status": "complete",
         "model_identity": {
             "base_model": metadata["model_type"],
@@ -213,6 +214,59 @@ def main() -> int:
             "note": "Transparent comparators evaluated in Phase 4 (see model_metadata.json). On this synthetic dataset a simple operational load rule is competitive with the model at the operating point; the model's added value over the rule is not demonstrated on synthetic data.",
             "test": metadata.get("baseline_comparison", {}).get("test"),
         },
+        "intended_use": {
+            "purpose": (
+                "Rank persons within a bounded, human-owned daily review queue, "
+                "alongside rule-based and personal-baseline evidence. Output is "
+                "one input to a deterministic alert policy and a human decision."
+            ),
+            "users": "Authorized welfare officers; command sees aggregates only.",
+            "decision_owner": "A human welfare decision-maker. The score never creates, closes, or escalates a case autonomously.",
+            "operational_boundary": "Score is separated from welfare signal by the alert policy (persistence, duplicate suppression, daily budget).",
+        },
+        "prohibited_use": [
+            "Any disciplinary, punitive, or career-consequence decision.",
+            "Any medical, psychiatric, or diagnostic interpretation.",
+            "Autonomous action: opening/closing cases or contacting personnel without a human decision-maker.",
+            "Treating a missing wellness report as evidence of elevated or reduced strain.",
+            "Use as a classifier with an automatic pass/fail outcome; the demonstrated value is top-of-ranking precision within a small review budget, not classification.",
+            "Deployment without real-world validation on the operating population.",
+        ],
+        "validation_design": {
+            "temporal_splits": "Train/validation/test by date, disjoint ranges; test never used for fitting, calibration, or threshold selection.",
+            "person_overlap": "Personnel are shared across splits by design (model is refreshed over the same population); the person-disjoint diagnostic quantifies that sharing.",
+            "leakage_probes": "scripts/validate_model_validity.py: features recomputed from source data truncated at a cutoff must be identical; label-correlation and contamination probes must pass.",
+            "operational_metrics": "scripts/benchmark_operational.py: precision at 1/2/5/10% review capacity against rule and temporal-score baselines; per-period drift view.",
+            "out_of_distribution": "Latent-generator families (noise, cohort change, tempo) reported separately in docs/MODEL_LINEAGE.md §3.3.",
+        },
+        "workload_evidence": {
+            "alert_policy": "alert-policy-v1 (persistence, escalation, recovery, daily budget)",
+            "naive_threshold_cases_180d": 45735,
+            "policy_cases_180d": 183,
+            "evidence": "scripts/simulate_alert_fatigue.py; artifacts/benchmark/alert_fatigue.json",
+        },
+        "weaknesses": [
+            "On the legacy generator the label is a same-day linear function of the features, so the fitted model shows no advantage over a two-variable rule or an unfitted weighted score.",
+            "On the latent generator the model's advantage is confined to the top of the ranking (2-4 pp precision at 1-2% review capacity) and reverses under a high-tempo family.",
+            "No real-world validation exists; all evidence is synthetic by construction.",
+            "Calibration degrades under base-rate drift; the drift indicator is review-only.",
+        ],
+        "drift_concerns": {
+            "observed": "Positive rate drifts 0.455 (train) to 0.350 (test) across the synthetic series; monthly mean scores drift with it.",
+            "mitigation_deployed": "Threshold selected on the most recent validation half; drift exposed via /api/dashboard/system-health for human review.",
+            "not_implemented": "Automatic retraining or threshold changes in response to drift (deliberate: drift response requires human ownership).",
+        },
+        "reproducibility": {
+            "seed": 42,
+            "command": "python scripts/build_all.py",
+            "property": "Byte-identical regenerated artifacts at the pinned seed and dependency set.",
+        },
+        "real_world_validation_requirements": [
+            "A labelled welfare outcome with meaningful prevalence from the operating population.",
+            "Prospective (not retrospective) evaluation at the department's actual review capacity.",
+            "Demonstrated top-K precision advantage over the rule + personal-baseline score before the model's ranking is preferred.",
+            "Governance sign-off for any operational use.",
+        ],
         "safety_privacy": {
             "raw_wellness_values_in_prediction_output": False,
             "medical_diagnosis": False,

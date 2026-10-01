@@ -26,15 +26,19 @@ Data sensitivity classes:
 from __future__ import annotations
 
 import logging
+import os
 from typing import Iterable
 
 from fastapi import Header, HTTPException
 
 from app.security.audit import AuditEvent, AuditLog
-from app.security.principal import AuthenticationError, Authenticator, HeaderTrustAuthenticator, Principal
+from app.security.principal import AuthenticationError, Authenticator, Principal, build_authenticator
 from app.security.security_config import AccessPurpose, SecurityRole
 
-_AUTHENTICATOR: Authenticator = HeaderTrustAuthenticator()
+# Resolved once at import from FORTIFY_AUTH_MODE. Production mode with no real
+# identity provider raises here (fail closed at startup) rather than serving
+# requests on header trust.
+_AUTHENTICATOR: Authenticator = build_authenticator(os.getenv("FORTIFY_AUTH_MODE", "demo"))
 
 # Which purpose each view class demands.
 VIEW_PURPOSE: dict[str, AccessPurpose] = {

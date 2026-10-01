@@ -22,10 +22,20 @@ def isolated_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return db
 
 def item_id() -> str:
-    return workflow._workflow_id("P-0001", "2026-06-29")
+    """First pending case from the alert-policy queue (see test_phase10)."""
+    items = workflow.list_items(pending_only=True, limit=1)
+    if not items:
+        raise RuntimeError("No pending workflow items; run scripts/build_all.py")
+    return items[0]["workflow_item_id"]
+
+person_under_test: str | None = None
+
 
 def advance_to_support_completed(client: TestClient) -> str:
+    global person_under_test
     wid = item_id()
+    detail = client.get(f"/api/workflow/{wid}", headers=HEADERS).json()
+    person_under_test = detail["person_id"]
     for state, reason in [
         ("ACKNOWLEDGED", "ACKNOWLEDGE_REVIEW"),
         ("IN_REVIEW", "START_REVIEW"),
@@ -70,7 +80,9 @@ def test_followup_schedule_reschedule_and_completion_are_persistent(isolated_sto
         assert first["status"] == "SCHEDULED"
         followups = client.get("/api/workflow/follow-ups", headers=HEADERS).json()
         assert followups["count"] == 1
-        assert followups["items"][0]["person_id"] == "P-0001"
+        # The case's person is whatever the alert-policy queue selected;
+        # the follow-up must belong to that person, not to a hardcoded id.
+        assert followups["items"][0]["person_id"] == person_under_test
         rescheduled = client.post(f"/api/workflow/{wid}/follow-up", headers=HEADERS,
                                   json={"scheduled_for": "2026-09-05T12:00:00+05:30"})
         assert rescheduled.status_code == 200

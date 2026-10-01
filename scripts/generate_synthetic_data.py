@@ -37,6 +37,27 @@ class Config:
     output: Path = Path("data/generated")
     start_date: str = "2026-01-01"
     wellness_coverage: float = 0.35
+    # "legacy": label is a same-day linear function of the observable load
+    # variables. Kept as the default for reproducibility of the shipped demo.
+    # "latent": strain is a persistent latent accumulator of PAST load with
+    # person-specific sensitivity, noisy measurement, and strain-dependent
+    # reporting. Under this mechanism the label is NOT a same-day function of
+    # the features, which is the honest test of whether a fitted model can add
+    # value over a static rule.
+    generator: str = "legacy"
+    strain_phi: float = 0.35        # weight on yesterday's load in the accumulator
+    strain_noise: float = 0.45      # measurement noise on the reported score
+    sensitivity_sd: float = 0.25    # person-to-person sensitivity variation
+    report_strain_penalty: float = 0.5  # high strain suppresses voluntary reporting
+    tempo_multiplier: float = 1.0   # scales unit operational tempo (OOD families)
+
+    def __post_init__(self) -> None:
+        if self.generator not in ("legacy", "latent"):
+            raise ValueError("generator must be 'legacy' or 'latent'")
+        if not 0 < self.strain_phi < 1:
+            raise ValueError("strain_phi must be in (0,1)")
+        if self.strain_noise < 0 or self.sensitivity_sd < 0:
+            raise ValueError("noise parameters must be non-negative")
 
 @dataclass(frozen=True)
 class Person:
@@ -186,6 +207,77 @@ def wellness_row(p, day, day_i, days, duty_hours, rest_hours, training_hours, in
     return {"wellness_event_id":f"WEL-{p.person_id[2:]}-{day_i+1:03d}","person_id":p.person_id,"date":dstr(day),"mood_score":mood,"energy_score":energy,"sleep_quality":sleep,"perceived_stress":ps,"workload_manageability":manage,"support_request":support}
 
 
+def scenario_families() -> dict[str, dict]:
+    """Out-of-distribution generator families for generalisation testing.
+
+    Each family keeps the latent mechanism but changes one structural property:
+    reporting coverage, measurement noise, lag length (phi), person sensitivity
+    spread, operational tempo, or the population itself. A model that only
+    works on the default family does not generalise; per-family results are
+    reported separately by scripts/benchmark_operational.py.
+    """
+    return {
+        "DEFAULT": {},
+        "HIGH_REPORTING": {"wellness_coverage": 0.55},
+        "LOW_REPORTING": {"wellness_coverage": 0.15},
+        "NOISY_MEASUREMENT": {"strain_noise": 0.90},
+        "SLOW_ACCUMULATION": {"strain_phi": 0.15},
+        "RESPONSIVE": {"strain_phi": 0.60},
+        "VARIED_PEOPLE": {"sensitivity_sd": 0.45},
+        "HIGHER_TEMPO": {"tempo_multiplier": 1.25},
+        "NEW_COHORT": {"seed": 4200},
+    }
+
+
+def latent_state_factory(cfg: Config, rng: np.random.Generator):
+    """Per-person latent strain state with realistic psychometrics.
+
+    strain_{t+1} = (1 - phi) * strain_t + phi * sensitivity * load_t + noise
+
+    * The strain today reflects the PAST week's load (lagged effect), not a
+      same-day transform of today's duty rows.
+    * ``sensitivity`` varies per person, so identical operational load produces
+      different strain in different people - personal baselines are required
+      to interpret any given load level.
+    * Reporting probability FALLS as strain rises (the people a welfare system
+      most needs to hear from report least often), and every reported score is
+      a noisy measurement of the latent state.
+    """
+    def person_state():
+        sensitivity = float(np.clip(rng.normal(1.0, cfg.sensitivity_sd), 0.5, 1.8))
+        return {"sensitivity": sensitivity, "strain": 0.30 * sensitivity}
+
+    def observe_load(duty_hours: float, rest_hours: float, training_hours: float, incidents: int) -> float:
+        return max(0.0, duty_hours / 8.0 - 1.0) + 0.45 * max(0.0, 8.0 - rest_hours) / 2.5 + 0.30 * (training_hours / 4.5) + 0.9 * incidents
+
+    def step(state: dict, duty_hours: float, rest_hours: float, training_hours: float, incidents: int, shock_scale: float) -> float:
+        load = observe_load(duty_hours, rest_hours, training_hours, incidents)
+        strain = (1.0 - cfg.strain_phi) * state["strain"] + cfg.strain_phi * state["sensitivity"] * load
+        strain += float(rng.normal(0.0, shock_scale))
+        state["strain"] = float(np.clip(strain, 0.0, 3.0))
+        return state["strain"]
+
+    def report_prob(strain: float) -> float:
+        # strain ~ [0, 3]; a fully strained person is 50% less likely to report.
+        burden = min(1.0, strain / 1.8)
+        return max(0.03, 1.0 - cfg.report_strain_penalty * burden)
+
+    def wellness_from_strain(p, day, day_i, strain: float) -> dict:
+        measured = strain + float(rng.normal(0.0, cfg.strain_noise))
+        ps = int(np.clip(round(1.4 + 2.45 * measured), 1, 5))
+        sleep = int(np.clip(round(4.4 - 1.05 * measured + rng.normal(0, 0.45)), 1, 5))
+        energy = int(np.clip(round(4.1 - 1.10 * measured + rng.normal(0, 0.5)), 1, 5))
+        mood = int(np.clip(round(4.1 - 0.90 * measured + rng.normal(0, 0.55)), 1, 5))
+        manage = int(np.clip(round(4.1 - 1.00 * measured + rng.normal(0, 0.5)), 1, 5))
+        support = bool(ps >= 4 and rng.random() < 0.12)
+        return {"wellness_event_id": f"WEL-{p.person_id[2:]}-{day_i+1:03d}", "person_id": p.person_id,
+                "date": dstr(day), "mood_score": mood, "energy_score": energy, "sleep_quality": sleep,
+                "perceived_stress": ps, "workload_manageability": manage, "support_request": support}
+
+    return {"person_state": person_state, "step": step, "report_prob": report_prob,
+            "wellness": wellness_from_strain}
+
+
 def generate(cfg: Config):
     if cfg.personnel<=0 or cfg.days<=0: raise ValueError("personnel and days must be positive")
     if not 0<cfg.wellness_coverage<=1: raise ValueError("wellness_coverage must be in (0,1]")
@@ -193,6 +285,10 @@ def generate(cfg: Config):
     units=units_frame(); personnel, people=make_people(cfg,units,rng)
     dep=[]; leaves=[]; duty=[]; recovery=[]; training=[]; incident=[]; wellness=[]
     wellness_people={p.person_id for p in people if rng.random()<cfg.wellness_coverage}
+    latent=None
+    if cfg.generator=="latent":
+        latent={p.person_id: latent_state_factory(cfg,rng)["person_state"]() for p in people}
+        mechanics=latent_state_factory(cfg,rng)
     for p in people:
         deps=deployment_plan(p,cfg,rng,start,end); dep += deps
         lvs=leave_plan(p,cfg,rng,start,end); leaves += lvs
@@ -213,7 +309,12 @@ def generate(cfg: Config):
                 rest=nfloat(rng,12,1.1,*REST_BOUNDS)
                 recovery.append({"recovery_event_id":f"REC-{p.person_id[2:]}-{di+1:03d}","person_id":p.person_id,"date":dstr(day),"rest_duration_hours":rest})
                 prev_hours=0; prev_night=False; consec=0; prev_inc=0
-                if p.person_id in wellness_people and rng.random()<.16: wellness.append(wellness_row(p,day,di,cfg.days,0,rest,0,0,rng))
+                if latent is not None:
+                    strain=mechanics["step"](latent[p.person_id],0.0,rest,0.0,0,0.10)
+                    if p.person_id in wellness_people and rng.random()<mechanics["report_prob"](strain):
+                        wellness.append(mechanics["wellness"](p,day,di,strain))
+                elif p.person_id in wellness_people and rng.random()<.16:
+                    wellness.append(wellness_row(p,day,di,cfg.days,0,rest,0,0,rng))
                 continue
             npb=float(UNIT_PROFILE[p.unit_type][0])+night_adj
             if p.scenario=="VOLATILE" and di%3==0: npb+=.16
@@ -223,6 +324,7 @@ def generate(cfg: Config):
             mean=base_hours+load*8 + (0.35*int(rng.integers(1,4)) if dep_id else 0) + (1.3 if high else 0) + (.4 if training_today else 0)
             if p.scenario=="VOLATILE": mean+=float(rng.normal(0,1.2))
             if prev_night and p.scenario=="RECOVERY_DEFICIT": mean+=.5
+            mean=max(3.0, mean*cfg.tempo_multiplier)
             hrs=nfloat(rng,mean,1.25+vol*2,*DUTY_BOUNDS)
             inten=int(np.clip(round(base_int+load*6+rng.normal(0,.7)+(1 if high else 0)),1,5))
             duty.append({"duty_event_id":f"DUT-{p.person_id[2:]}-{di+1:03d}","person_id":p.person_id,"timestamp":(day+pd.Timedelta(hours=21 if night else int(rng.integers(5,14)))).isoformat(),"date":dstr(day),"duty_type":dtype,"duration_hours":hrs,"night_shift":night,"intensity_level":inten,"deployment_id":dep_id})
@@ -239,7 +341,14 @@ def generate(cfg: Config):
                 req=round(float(np.clip(2+ii*.8+rng.normal(0,.6),1,8)),2)
                 incident.append({"incident_event_id":f"INC-{p.person_id[2:]}-{di+1:03d}","person_id":p.person_id,"date":dstr(day),"incident_type":itype,"intensity_level":ii,"recovery_requirement":req})
             prev_inc=int(incflag); prev_hours=hrs; prev_night=night
-            if p.person_id in wellness_people and rng.random()<.23: wellness.append(wellness_row(p,day,di,cfg.days,hrs,rest,tr_hours,int(incflag),rng))
+            if latent is not None:
+                # The latent mechanism: strain accumulates from PAST load with
+                # person-specific sensitivity; reporting is strain-dependent.
+                strain=mechanics["step"](latent[p.person_id],hrs,rest,tr_hours,int(incflag),0.12)
+                if p.person_id in wellness_people and rng.random()<mechanics["report_prob"](strain):
+                    wellness.append(mechanics["wellness"](p,day,di,strain))
+            elif p.person_id in wellness_people and rng.random()<.23:
+                wellness.append(wellness_row(p,day,di,cfg.days,hrs,rest,tr_hours,int(incflag),rng))
     columns={
         "personnel.csv":["person_id","unit_id","role","deployment_type","service_years","joining_date","current_posting_start"],
         "units.csv":["unit_id","unit_type","unit_name","night_duty_probability","typical_duty_hours","typical_intensity_level","incident_probability","deployment_probability","training_probability","operational_assumption"],
@@ -334,11 +443,18 @@ def main():
     ap.add_argument("--personnel",type=int,default=500); ap.add_argument("--days",type=int,default=180); ap.add_argument("--seed",type=int,default=42)
     ap.add_argument("--output",type=Path,default=Path("data/generated")); ap.add_argument("--start-date",default="2026-01-01")
     ap.add_argument("--wellness-coverage",type=float,default=.35)
-    a=ap.parse_args(); cfg=Config(a.personnel,a.days,a.seed,a.output,a.start_date,a.wellness_coverage)
+    ap.add_argument("--generator",choices=("legacy","latent"),default="legacy",
+                    help="legacy: same-day label mechanism (shipped demo). latent: lagged strain accumulator with person sensitivity and strain-dependent reporting.")
+    ap.add_argument("--strain-phi",type=float,default=.35); ap.add_argument("--strain-noise",type=float,default=.45)
+    ap.add_argument("--sensitivity-sd",type=float,default=.25); ap.add_argument("--tempo-multiplier",type=float,default=1.0)
+    a=ap.parse_args()
+    cfg=Config(a.personnel,a.days,a.seed,a.output,a.start_date,a.wellness_coverage,a.generator,
+               a.strain_phi,a.strain_noise,a.sensitivity_sd,0.5,a.tempo_multiplier)
     frames=generate(cfg); write(frames,cfg.output)
     for n in frames: print(f"{n.replace('.csv','').replace('_',' ').title()}: {len(frames[n])}")
     write_readme(cfg.output,cfg,frames)
     print("Scenario mix (generation-only): " + ", ".join(f"{k}={v}" for k,v in scenario_counts(cfg.personnel,cfg.seed).items()))
+    print(f"Generator: {cfg.generator}")
     print(f"Simulation horizon: {cfg.days} days starting {cfg.start_date}")
     print(f"Seed: {cfg.seed}")
     print(f"Output: {cfg.output}")
