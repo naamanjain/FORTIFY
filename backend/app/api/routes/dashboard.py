@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+from pathlib import Path
 import json
 from datetime import datetime, timezone
 from threading import RLock
@@ -17,6 +18,7 @@ from app.api.dependencies import (
     require_principal,
 )
 from app.core.database import check_database
+from app.core.paths import ARTIFACTS_DIR as _DEFAULT_ARTIFACTS_DIR
 from app.core.paths import AUDIT_PATH as _DEFAULT_AUDIT_PATH
 from app.core.paths import DATA_DIR as _DEFAULT_DATA_DIR
 from app.security.audit import AuditLog
@@ -28,6 +30,7 @@ router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 # Module-level so tests can patch these locations in isolation.
 DATA_DIR = _DEFAULT_DATA_DIR
 AUDIT_PATH = _DEFAULT_AUDIT_PATH
+ARTIFACTS_DIR = _DEFAULT_ARTIFACTS_DIR
 
 _SUMMARY_CACHE: dict[str, Any] = {}
 _SUMMARY_SIGNATURE: tuple[int, int] | None = None
@@ -400,6 +403,39 @@ def _redact_details(details: Any) -> Any:
     }
 
 
+@router.get("/review-queue")
+def review_queue(date: str | None = Query(default=None, max_length=10),
+                 principal: Principal = FastAPIDepends(require_principal)) -> dict[str, Any]:
+    """The alert-policy review queue: which scores became human work today.
+
+    This is the operational answer to "what should I review next?" - cases the
+    deterministic alert policy promoted, plus the candidates suppressed by the
+    daily budget so the selection is auditable rather than silent.
+    """
+    require_welfare(principal, "/api/dashboard/review-queue", _authz_audit_path())
+    queue_path = DATA_DIR / "review_queue.csv"
+    if not queue_path.exists():
+        raise HTTPException(status_code=503, detail="Review queue is unavailable; generate the dataset (python scripts/build_all.py).")
+    queue = pd.read_csv(queue_path, usecols=["person_id", "date", "score", "risk_band", "alert_state", "case_created", "suppressed_by_budget", "evidence_days", "reason"])
+    queue["date"] = queue["date"].astype(str)
+    target = date or str(queue["date"].max())
+    day = queue[queue["date"] == target]
+    cases = day[day["case_created"].astype(str).str.lower().isin(("true", "1"))]
+    suppressed = day[day["suppressed_by_budget"].astype(str).str.lower().isin(("true", "1"))]
+    # Days where every candidate is already inside an open case are a
+    # legitimate and common answer: "no new cases today, N open signals".
+    open_signals = day[day["alert_state"].isin(["PERSISTENT", "ESCALATED"])]
+    return {
+        "date": target,
+        "cases": cases.sort_values(["score", "person_id"], ascending=[False, True]).to_dict(orient="records"),
+        "suppressed_by_budget": suppressed.to_dict(orient="records"),
+        "case_count": int(len(cases)),
+        "suppressed_count": int(len(suppressed)),
+        "open_signal_count": int(len(open_signals)),
+        "privacy_note": "Queue metadata only; open individual cases through the welfare views.",
+    }
+
+
 @router.get("/system-health")
 def system_health(principal: Principal = FastAPIDepends(require_principal)) -> dict[str, Any]:
     # Health is intentionally readable by BOTH the infrastructure administrator
@@ -414,12 +450,47 @@ def system_health(principal: Principal = FastAPIDepends(require_principal)) -> d
     db_ok = check_database()
     verification = AuditLog(AUDIT_PATH).verify()
     # Only artifacts the running API actually consumes at request time.
-    artifacts = ["personnel.csv", "intervention_recommendations.csv", "intervention_feasibility.csv"]
+    artifacts = ["personnel.csv", "intervention_recommendations.csv", "intervention_feasibility.csv", "review_queue.csv"]
     artifact_status = {name: (DATA_DIR / name).exists() for name in artifacts}
     with _SUMMARY_CACHE_LOCK: cache_ready = "joined" in _SUMMARY_CACHE
+
+    # Model and pipeline identity, so a deployment can be audited for running
+    # the artifacts it thinks it is running.
+    model_version = pipeline_version = None
+    card_path = ARTIFACTS_DIR / "phase5" / "model_card.json"
+    try:
+        card = json.loads(card_path.read_text(encoding="utf-8"))
+        model_version = card.get("model_identity", {}).get("phase5_model_version")
+        pipeline_version = card.get("pipeline", {}).get("pipeline_version")
+    except (OSError, json.JSONDecodeError):
+        pass
+
+    # Data freshness and a coarse score-drift indicator for review (never an
+    # automatic retraining trigger).
+    freshness = None
+    drift = None
+    try:
+        decisions = _read_csv("risk_decisions.csv", ["person_id", "date", "welfare_risk_probability"])
+        decisions["date"] = pd.to_datetime(decisions["date"])
+        latest_day = decisions["date"].max()
+        freshness = {"latest_event_date": str(latest_day.date()),
+                     "age_days": int((pd.Timestamp.now() - latest_day).days)}
+        decisions["period"] = decisions["date"].dt.to_period("M").astype(str)
+        monthly = decisions.groupby("period")["welfare_risk_probability"].mean()
+        if len(monthly) >= 3:
+            recent, prior = monthly.iloc[-1], monthly.iloc[:-1].mean()
+            drift = {"recent_mean_score": round(float(recent), 4),
+                     "prior_mean_score": round(float(prior), 4),
+                     "shift": round(float(recent - prior), 4),
+                     "note": "Review indicator only; the score distribution drifting does not change the deployed model automatically."}
+    except HTTPException:
+        pass
+
     return {"application": {"api": "Healthy", "database": "Healthy" if db_ok else "Warning",
                             "dashboard_cache": "Warm" if cache_ready else "Cold"},
-            "data": {"artifacts": artifact_status},
+            "model": {"model_version": model_version, "pipeline_version": pipeline_version,
+                      "alert_policy_version": "alert-policy-v1"},
+            "data": {"artifacts": artifact_status, "freshness": freshness, "score_drift": drift},
             "governance": {"access_control": "Prototype role/purpose headers (not authenticated)",
                            "auth_method": principal.auth_method,
                            "authenticated": principal.authenticated,

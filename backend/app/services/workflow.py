@@ -14,7 +14,7 @@ from typing import Any, Iterator
 import pandas as pd
 
 from app.core.config import settings
-from app.core.database import resolve_sqlite_url
+from app.core.database import begin_write, column_exists, is_sqlite, lock_rows, resolve_sqlite_url
 from app.core.paths import AUDIT_PATH, DATA_DIR
 from app.security.audit import AuditEvent, AuditLog
 from app.security.rbac import authorize
@@ -64,19 +64,30 @@ _DECISION_CACHE_LOCK = RLock()
 _MATERIALIZED_GUARD: tuple[str, tuple[int, int, int]] | None = None
 
 
+def _as_rows(conn: Any) -> None:
+    """Enable name-based row access where the backend supports it.
+
+    SQLite needs sqlite3.Row; the PostgreSQL adapter in app.core.database
+    already returns PostgresRow objects, so this is a no-op there.
+    """
+    from app.core.database import is_sqlite
+
+    if is_sqlite():
+        conn.row_factory = sqlite3.Row
+
+
 @contextmanager
-def _connection() -> Iterator[sqlite3.Connection]:
-    conn = sqlite3.connect(_db_path(), timeout=10.0)
-    try:
-        conn.execute("PRAGMA foreign_keys = ON")
-        conn.execute("PRAGMA busy_timeout = 10000")
+def _connection() -> Iterator[Any]:
+    from app.core.database import connect
+
+    # Route through _db_path() so tests and scripts can isolate the location.
+    # PostgreSQL deployments ignore the path override and use the URL.
+    with connect(sqlite_path=_db_path() if is_sqlite() else None) as conn:
         yield conn
-    finally:
-        conn.close()
 
 
 def _data_signature(data_dir: Path) -> tuple[int, int, int]:
-    names = ("intervention_recommendations.csv", "intervention_feasibility.csv")
+    names = ("intervention_recommendations.csv", "intervention_feasibility.csv", "review_queue.csv")
     mtimes = []
     for name in names:
         path = data_dir / name
@@ -86,10 +97,11 @@ def _data_signature(data_dir: Path) -> tuple[int, int, int]:
                 "Generate the demo dataset first (python scripts/build_all.py)."
             )
         mtimes.append(path.stat().st_mtime_ns)
-    return (mtimes[0], mtimes[1], int(data_dir.stat().st_mtime_ns))
+    return (mtimes[0], mtimes[1], mtimes[2])
 
 
 def _db_path() -> Path:
+    """SQLite location; only meaningful when the deployment runs on SQLite."""
     return resolve_sqlite_url(settings.database_url)
 
 
@@ -97,15 +109,22 @@ def _audit_path() -> Path:
     return AUDIT_PATH
 
 
-def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
-    existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
-    if column not in existing:
+def _ensure_column(conn: Any, table: str, column: str, definition: str) -> None:
+    if not column_exists(conn, table, column):
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
 def initialize_workflow_store() -> None:
-    path = _db_path(); path.parent.mkdir(parents=True, exist_ok=True)
+    if is_sqlite():
+        # PostgreSQL locations are managed by the database server; only the
+        # SQLite deployment creates its file and directory.
+        path = _db_path(); path.parent.mkdir(parents=True, exist_ok=True)
     with _connection() as conn:
+        # Materialization bookkeeping lives here too; created defensively because
+        # scripts and tests may initialize the store without the API lifespan.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS system_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+        )
         conn.execute("""CREATE TABLE IF NOT EXISTS workflow_items (
             workflow_item_id TEXT PRIMARY KEY, person_id TEXT NOT NULL, recommendation_date TEXT NOT NULL,
             risk_band TEXT NOT NULL, recommended_action TEXT NOT NULL, priority TEXT NOT NULL,
@@ -179,12 +198,24 @@ def _workflow_id(person_id: str, date: str) -> str:
 
 
 def _load_decisions() -> pd.DataFrame:
+    """Load the recommendations the alert policy promoted to human cases.
+
+    Every scored person-day has a recommendation, but a recommendation is not
+    a case: the alert policy (persistence, duplicate suppression, daily
+    budget) decides which of them become human work. Materializing one
+    workflow item per person-day would put ~45,700 cases on the queue for the
+    demo world alone; the policy reduces that to the daily review budget
+    while the full recommendation stream remains available for audit.
+    """
     global _DECISION_CACHE
     data_dir = DATA_DIR
     with _DECISION_CACHE_LOCK:
         signature = _data_signature(data_dir)
         if _DECISION_CACHE is not None and _DECISION_CACHE[0] == signature:
             return _DECISION_CACHE[1].copy()
+        queue = pd.read_csv(data_dir / "review_queue.csv", usecols=["person_id", "date", "case_created"])
+        queue = queue[queue["case_created"].astype(str).str.lower().isin(("true", "1"))]
+        queue = queue[["person_id", "date"]].rename(columns={"date": "queue_date"})
         rec = pd.read_csv(data_dir / "intervention_recommendations.csv", usecols=[
             "person_id", "date", "welfare_risk_probability", "risk_band", "recommended_action", "priority", "rationale",
             "requires_human_review", "model_version", "policy_version"])
@@ -195,6 +226,11 @@ def _load_decisions() -> pd.DataFrame:
             df["date"] = pd.to_datetime(df["date"], errors="raise").dt.strftime("%Y-%m-%d")
         merged = rec.merge(feas, on=["person_id", "date", "recommended_action"], how="inner",
                            validate="one_to_one", suffixes=("_rec", "_feas"))
+        queue["date"] = queue.pop("queue_date")
+        # Only alert-policy cases reach the workflow; suppressed and
+        # persistent rows stay in review_queue.csv for audit.
+        merged = merged.merge(queue.drop_duplicates(["person_id", "date"]),
+                              on=["person_id", "date"], how="inner", validate="one_to_one")
         _DECISION_CACHE = (signature, merged.copy())
         return merged
 
@@ -213,11 +249,43 @@ def _personnel_unit_map() -> dict[str, str]:
 def ensure_workflow_items() -> None:
     global _MATERIALIZED_GUARD
     signature = _data_signature(DATA_DIR)
-    guard = (str(_db_path()), signature)
+    # The physical store identity: the resolved SQLite path (which tests
+    # re-point at isolated databases) or the PostgreSQL URL. The data
+    # signature beside it triggers re-materialization when artifacts change.
+    store_id = str(_db_path()) if is_sqlite() else settings.database_url
+    guard = (store_id, signature)
     if _MATERIALIZED_GUARD == guard:
         return
     initialize_workflow_store(); data = _load_decisions(); units = _personnel_unit_map()
     with _connection() as conn:
+        # The materialization set changes when the alert policy or its inputs
+        # change. Items no longer in the queue are removed ONLY if no human
+        # has acted on them (state NEW, no transitions); items with history
+        # are permanent operational records and are never pruned.
+        materialization_epoch = f"queue:{int(signature[2])}"
+        epoch_row = conn.execute(
+            "SELECT value FROM system_metadata WHERE key = 'workflow_materialization_epoch'"
+        ).fetchone()
+        if epoch_row is None or epoch_row[0] != materialization_epoch:
+            pruned = conn.execute(
+                """DELETE FROM workflow_items WHERE workflow_state = 'NEW'
+                   AND workflow_item_id NOT IN (
+                       SELECT w.workflow_item_id FROM workflow_items w
+                       JOIN workflow_audit_events e ON e.workflow_item_id = w.workflow_item_id
+                   ) AND workflow_item_id NOT IN (
+                       SELECT workflow_item_id FROM workflow_support_events
+                   ) AND workflow_item_id NOT IN (
+                       SELECT workflow_item_id FROM workflow_feedback
+                   )"""
+            ).rowcount
+            if pruned:
+                logging.getLogger("fortify").info("workflow_materialization_pruned", extra={"count": pruned})
+            conn.execute(
+                "INSERT INTO system_metadata(key, value) VALUES (?, ?) "
+                "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                ("workflow_materialization_epoch", materialization_epoch),
+            )
+            conn.commit()
         existing = {row[0] for row in conn.execute("SELECT workflow_item_id FROM workflow_items")}
         rows = []
         for r in data.itertuples(index=False):
@@ -230,23 +298,22 @@ def ensure_workflow_items() -> None:
                          int(bool(r.requires_human_review_feas)), str(r.model_version), str(r.policy_version),
                          str(r.feasibility_policy_version), "NEW", None, None, None, None, None, None, None, 0,
                          units.get(str(r.person_id))))
-        conn.executemany("""INSERT OR IGNORE INTO workflow_items
+        conn.executemany("""INSERT INTO workflow_items
             (workflow_item_id, person_id, recommendation_date, risk_band, recommended_action, priority,
              feasibility_status, constraint_flags, rationale, requires_human_review, model_version, policy_version,
              feasibility_policy_version, workflow_state, last_transition_at, last_actor_role, last_reason_code,
              support_completed_at, support_completed_by_role, active_support_event_id, active_followup_id,
              feedback_submitted, unit_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", rows)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (workflow_item_id) DO NOTHING""", rows)
         # Backfill unit identifiers for rows created before the column existed.
         null_units = conn.execute("SELECT COUNT(*) FROM workflow_items WHERE unit_id IS NULL").fetchone()[0]
         if null_units:
-            conn.execute("CREATE TEMP TABLE _personnel_units (person_id TEXT PRIMARY KEY, unit_id TEXT)")
-            conn.executemany("INSERT OR REPLACE INTO _personnel_units VALUES (?, ?)",
-                             [(pid, uid) for pid, uid in units.items()])
-            conn.execute("""UPDATE workflow_items SET unit_id =
-                (SELECT u.unit_id FROM _personnel_units u WHERE u.person_id = workflow_items.person_id)
-                WHERE unit_id IS NULL""")
-            conn.execute("DROP TABLE _personnel_units")
+            for person_id, unit_id in units.items():
+                conn.execute(
+                    "UPDATE workflow_items SET unit_id = ? WHERE unit_id IS NULL AND person_id = ?",
+                    (unit_id, person_id),
+                )
         conn.commit()
     _MATERIALIZED_GUARD = guard
 
@@ -294,7 +361,7 @@ def _trend_lookup() -> dict[tuple[str, str], str]:
 def list_items(*, pending_only: bool = True, limit: int = 50) -> list[dict[str, Any]]:
     ensure_workflow_items(); limit = max(1, min(limit, 200)); trend_lookup = _trend_lookup()
     with _connection() as conn:
-        conn.row_factory = sqlite3.Row
+        _as_rows(conn)
         states = "'NEW','ACKNOWLEDGED','IN_REVIEW','SUPPORT_PLANNED','DEFERRED'"
         sql = f"SELECT * FROM workflow_items WHERE workflow_state IN ({states})" if pending_only else "SELECT * FROM workflow_items"
         sql += " ORDER BY recommendation_date DESC, CASE priority WHEN 'HIGH' THEN 0 WHEN 'MEDIUM' THEN 1 WHEN 'LOW' THEN 2 ELSE 3 END, workflow_item_id LIMIT ?"
@@ -307,7 +374,7 @@ def list_items(*, pending_only: bool = True, limit: int = 50) -> list[dict[str, 
 def get_item(workflow_item_id: str) -> dict[str, Any] | None:
     ensure_workflow_items()
     with _connection() as conn:
-        conn.row_factory = sqlite3.Row
+        _as_rows(conn)
         row = conn.execute("SELECT * FROM workflow_items WHERE workflow_item_id = ?", (workflow_item_id,)).fetchone()
         if not row: return None
         item = _row_to_dict(row)
@@ -389,8 +456,17 @@ def transition_item(workflow_item_id: str, *, new_state: str, actor_role: str, p
     if not reason_code.strip(): raise ValueError("reason_code is required for workflow transitions")
     ensure_workflow_items(); now = datetime.now(timezone.utc).isoformat(); support_created = None
     with _connection() as conn:
-        conn.execute("BEGIN IMMEDIATE"); conn.row_factory = sqlite3.Row
-        row = conn.execute("SELECT * FROM workflow_items WHERE workflow_item_id=?", (workflow_item_id,)).fetchone()
+        begin_write(conn); _as_rows(conn)
+        # The state read and the write are one serialized cycle: SQLite holds
+        # the IMMEDIATE lock, PostgreSQL takes row locks here. Without this a
+        # concurrent transition could read the same old state and both write.
+        result = lock_rows(conn, "SELECT * FROM workflow_items WHERE workflow_item_id=?", (workflow_item_id,))
+        if isinstance(result, list):
+            row = result[0] if result else None
+        elif hasattr(result, "fetchone"):
+            row = result.fetchone()
+        else:
+            row = result
         if not row: raise KeyError("Workflow item not found")
         current = str(row["workflow_state"])
         # Stale-client guard: a client that loaded the case before someone else
@@ -455,7 +531,7 @@ def record_feedback(workflow_item_id: str, *, helpfulness: int, comment: str | N
     # Replay path: same key, previously recorded result.
     if idempotency_key:
         with _connection() as conn:
-            conn.row_factory = sqlite3.Row
+            _as_rows(conn)
             prior = conn.execute(
                 "SELECT * FROM workflow_feedback WHERE idempotency_key = ? AND workflow_item_id = ?",
                 (idempotency_key, workflow_item_id),
@@ -532,7 +608,7 @@ def schedule_followup(workflow_item_id: str, scheduled_for: str, actor_role: str
 def list_followups(status: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
     ensure_workflow_items(); limit = max(1, min(limit, 200)); now = datetime.now(timezone.utc)
     with _connection() as conn:
-        conn.row_factory = sqlite3.Row
+        _as_rows(conn)
         rows = conn.execute("""SELECT f.*, w.risk_band, w.recommended_action, w.priority, w.feasibility_status,
             w.constraint_flags, w.last_actor_role, w.workflow_state, s.completed_at AS support_completed_at,
             s.support_action, s.actor_role AS support_actor_role,
@@ -568,7 +644,7 @@ def list_followups(status: str | None = None, limit: int = 100) -> list[dict[str
 def complete_followup(followup_id: str, actor_role: str, purpose: str) -> dict[str, Any]:
     _require_welfare_actor(actor_role, purpose); ensure_workflow_items(); now=datetime.now(timezone.utc).isoformat()
     with _connection() as conn:
-        conn.row_factory = sqlite3.Row
+        _as_rows(conn)
         conn.execute("BEGIN IMMEDIATE")
         row=conn.execute("""SELECT f.status AS followup_status, f.person_id AS fu_person_id,
             w.workflow_item_id AS wi_id, w.workflow_state AS wi_state, w.recommendation_date AS wi_date,

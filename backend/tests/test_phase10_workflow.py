@@ -25,7 +25,17 @@ def isolated_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def first_workflow_id() -> str:
-    return workflow._workflow_id("P-0001", "2026-06-29")
+    """The first pending case in the materialized workflow.
+
+    Cases come from the alert-policy review queue, so a fixed person/date
+    cannot be assumed to be a case; the queue decides. Determinism comes from
+    the queue's ordering (date, score desc, person id), not from a hardcoded
+    person.
+    """
+    items = workflow.list_items(pending_only=True, limit=1)
+    if not items:
+        raise RuntimeError("No pending workflow items; run scripts/build_all.py")
+    return items[0]["workflow_item_id"]
 
 
 def test_workflow_starts_new_and_does_not_auto_complete(isolated_store: Path) -> None:

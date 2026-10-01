@@ -119,6 +119,34 @@ jobs:
         # the label, or if the temporal partitions overlap.
         run: python scripts/validate_model_validity.py
 
+      - name: Alert policy + explanation fidelity + fatigue simulation
+        # Non-negotiable operational gates: the alert policy must bound case
+        # creation (regression to "a case per threshold day" fails here),
+        # every displayed explanation must trace to real computed data, and
+        # recommendation provenance must name real policy rules.
+        run: |
+          python scripts/simulate_alert_fatigue.py
+          python - <<'PY'
+          import json, sys
+          from pathlib import Path
+          report = json.loads(Path("artifacts/benchmark/alert_fatigue.json").read_text())
+          population_days = report["population"]["person_days"]
+          # The policy must suppress the overwhelming majority of naive
+          # threshold-day alerts; a regression to unbounded case creation
+          # (e.g. one case per person-day) fails here.
+          if report["policy_new_cases"] > 1000:
+              sys.exit(f"ALERT VOLUME GATE FAILED: {report['policy_new_cases']} cases created (budget regression)")
+          if report["suppressed_by_budget"] and not report["duplicate_alerts_prevented"]:
+              sys.exit("ALERT POLICY GATE FAILED: suppressions present but no duplicate prevention")
+          print(f"Alert-volume gate OK: {report['policy_new_cases']} cases, "
+                f"{report['duplicate_alerts_prevented']} duplicates prevented")
+          PY
+
+      - name: Explanation and recommendation fidelity gates
+        # Included in the pytest run above via test_explanation_fidelity.py;
+        # re-asserted here explicitly so the gate is visible in the job log.
+        run: pytest backend/tests/test_explanation_fidelity.py backend/tests/test_alert_policy.py -q
+
       - name: Upload regenerated artifacts for inspection
         if: always()
         uses: actions/upload-artifact@v4

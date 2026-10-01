@@ -56,6 +56,7 @@ adds exactly one capability.
 | Model | `risk_predictions.csv`, `artifacts/phase4/` | Logistic-regression probability of elevated future voluntary stress self-report |
 | Risk decisions | `risk_decisions.csv`, `artifacts/phase5/` | Platt calibration, a locked operating threshold, LOW/MODERATE/HIGH band, contributing operational signals |
 | Explanations | `explanations.jsonl` | Structured contributing factors (value, reference, window, admitting rule) for flagged cases on the latest decision day |
+| Review queue | `review_queue.csv` | The daily bounded human-review queue produced by the alert policy from risk scores (persistence, duplicate suppression, daily budget) |
 | Interventions | `intervention_recommendations.csv` | Deterministic welfare-support action mapping with rationales and per-case policy provenance (`policy_rule`, `provenance`) |
 | Feasibility | `intervention_feasibility.csv` | Operational constraint flags (duty conflict, workload, unit pressure) |
 | Demo package | `artifacts/phase12/` | A reproducible hero case + timeline for demonstration |
@@ -374,6 +375,51 @@ HTTP 403, and the denial itself is audit-recorded.
 
 ---
 
+## From scores to cases: the alert policy
+
+The model scores every person-day; a score is evidence, not work. The
+deterministic alert policy (`backend/app/ml/alert_policy.py`) decides what
+becomes a human case: an evidence gate (score + band), a persistence window,
+duplicate suppression while a case is open, escalation on material change,
+recovery detection, and a daily case budget (`max_daily_review_cases`,
+default 25). Over-budget candidates are recorded as `SUPPRESSED_BUDGET` in
+`review_queue.csv` — visible, never silently dropped. On the demo world this
+turns ~45,700 threshold-firing person-days into 183 cases over 180 days
+(`scripts/simulate_alert_fatigue.py`). The workflow materializes cases only
+from this queue; welfare officers can read the day's queue — including
+suppressions — at `GET /api/dashboard/review-queue`.
+
+## Model capability: what the benchmark shows
+
+`scripts/benchmark_operational.py` measures precision at fixed review
+capacities (1/2/5/10% of person-days) against a two-variable operational rule
+and an unfitted weighted score, across the two generator mechanisms and
+out-of-distribution families. The honest summary (full evidence:
+[docs/MODEL_LINEAGE.md](docs/MODEL_LINEAGE.md)):
+
+- On the shipped demo generator the label is a same-day linear function of the
+  features, so the fitted model shows **no advantage** over the rule or the
+  weighted score.
+- On the latent generator (lagged strain, person-specific sensitivity,
+  strain-dependent reporting) the fitted model is 2–4 pp more precise at the
+  1–2% capacities that match real review budgets, and this advantage persists
+  or grows under measurement-noise and new-cohort families — but reverses
+  under a high-tempo family.
+- Decision: the model is used as a **ranking signal inside the bounded queue**,
+  never as an autonomous classifier. The governance properties hold even if
+  the model were uninformative.
+
+## Authentication modes
+
+`FORTIFY_AUTH_MODE` selects the authenticator:
+
+- `demo` (default) — header trust, labelled unauthenticated everywhere it
+  surfaces. For the demonstration environment only.
+- `production` — **fails closed at startup** until a real identity-provider
+  authenticator is implemented and registered
+  (`app/security/principal.build_authenticator`). There is no mode in which
+  production credentials are simulated.
+
 ## Limitations
 
 These are real and deliberate; none are hidden.
@@ -456,6 +502,9 @@ Docker daemon.
 | [DECISIONS.md](DECISIONS.md) | Architecture decision records |
 | [SECURITY_MODEL.md](SECURITY_MODEL.md) | Roles, purposes, audit chain, prototype vs production |
 | [docs/POSTGRES_MIGRATION.md](docs/POSTGRES_MIGRATION.md) | SQLite→PostgreSQL path: what changes, what is verified, what is not claimed |
+| [docs/MODEL_LINEAGE.md](docs/MODEL_LINEAGE.md) | Stage-by-stage data/model lineage, generator forensics, benchmark evidence, architecture decision |
+| [docs/PRODUCTION_READINESS.md](docs/PRODUCTION_READINESS.md) | Area-by-area readiness matrix with verification evidence and blockers |
+| [docs/BACKUP_RECOVERY.md](docs/BACKUP_RECOVERY.md) | Backup, retention, and recovery requirements (requirements only, nothing implemented) |
 | [ROADMAP.md](ROADMAP.md) | Phase sequence and completion status |
 | [TODO.md](TODO.md) | Remaining limitations |
 | [DEMO_SCENARIO.md](DEMO_SCENARIO.md) | Demonstration storyline |

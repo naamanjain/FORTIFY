@@ -70,8 +70,22 @@ class AuthenticationError(Exception):
         self.status_code = status_code
 
 
+class ProductionAuthenticationRequired(RuntimeError):
+    """Production mode is configured but no real authenticator is available.
+
+    Raised at startup, never per-request: a deployment that asks for
+    production authentication must refuse to boot rather than silently
+    continue on header trust.
+    """
+
+
 class Authenticator(Protocol):
-    """The seam a real identity provider plugs into."""
+    """The seam a real identity provider plugs into.
+
+    Implementations resolve credentials to a :class:`Principal`. Authorization
+    (``app.security.rbac``, the view classes in ``app.api.dependencies``)
+    depends only on the Principal, never on how it was authenticated.
+    """
 
     method_name: str
 
@@ -94,16 +108,12 @@ class HeaderTrustAuthenticator:
 
     method_name = "header_trust"
 
-    def __init__(self, *, require_flag: str | None = "FORTIFY_ALLOW_HEADER_AUTH") -> None:
-        self.require_flag = require_flag
-
     def authenticate(self, credentials: dict[str, str]) -> Principal:
         role_raw = (credentials.get("role") or "").strip()
         purpose_raw = (credentials.get("purpose") or "").strip()
         if not role_raw or not purpose_raw:
             raise AuthenticationError(
-                "This deployment requires authenticated credentials. "
-                "The prototype header-trust mechanism is disabled."
+                "Role and purpose credentials are required."
             )
         try:
             role = SecurityRole(role_raw)
@@ -118,3 +128,35 @@ class HeaderTrustAuthenticator:
             auth_method=self.method_name,
             authenticated=False,
         )
+
+
+AUTH_MODE_DEMO = "demo"
+AUTH_MODE_PRODUCTION = "production"
+
+
+def build_authenticator(auth_mode: str) -> Authenticator:
+    """Resolve the authenticator for the configured authentication mode.
+
+    * ``demo`` — header trust, explicitly labelled unauthenticated everywhere
+      it surfaces. The demonstration default.
+    * ``production`` — requires a real identity-provider authenticator. None
+      ships with this repository, so production mode **fails closed at
+      startup** with an actionable error rather than booting on header trust.
+      When an OIDC/OAuth2 authenticator is implemented, register it here.
+
+    There is deliberately no mode in which production credentials are
+    simulated: a fake IdP would be worse than none.
+    """
+    if auth_mode == AUTH_MODE_DEMO:
+        return HeaderTrustAuthenticator()
+    if auth_mode == AUTH_MODE_PRODUCTION:
+        raise ProductionAuthenticationRequired(
+            "FORTIFY_AUTH_MODE=production requires a real identity-provider "
+            "authenticator (OIDC/OAuth2/SSO). None is implemented in this "
+            "prototype. Implement app.security.principal.Authenticator against "
+            "your identity provider and register it in build_authenticator(), "
+            "or run with FORTIFY_AUTH_MODE=demo on a trusted network."
+        )
+    raise ProductionAuthenticationRequired(
+        f"Unknown FORTIFY_AUTH_MODE {auth_mode!r}; expected 'demo' or 'production'."
+    )

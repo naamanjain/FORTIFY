@@ -25,6 +25,7 @@ STEPS = [
     "build_baselines.py",
     "train_model.py",
     "build_phase5_risk_layer.py",
+    "build_review_queue.py",
     "build_interventions.py",
     "build_feasibility.py",
     "prepare_demo.py",
