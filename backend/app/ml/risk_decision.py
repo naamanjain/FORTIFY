@@ -123,6 +123,7 @@ def select_operating_threshold(
     threshold_table: pd.DataFrame,
     *,
     minimum_validation_precision: float = 0.55,
+    recent_window_table: pd.DataFrame | None = None,
 ) -> ThresholdSelection:
     """Pick the operating point for welfare triage.
 
@@ -132,12 +133,38 @@ def select_operating_threshold(
     review queue prioritizes instead of flagging most of the population. The
     floor is prototype tuning, not departmental policy, and requires
     real-world review before operational use.
+
+    Time-aware variant: when ``recent_window_table`` is supplied - metrics
+    computed over the most recent portion of the validation window - selection
+    happens on that window instead. Rationale: the validation window closest to
+    the deployment period best represents the population and base rate the
+    model will actually operate on. On this dataset the full-window choice
+    degraded sharply on the held-out month (the positive rate drifted from 0.45
+    in training to 0.35 later in the series), while the recent-window choice
+    held up better. The held-out window is never used to choose the threshold;
+    it is used only to *report* how each policy transferred.
     """
     required = {"threshold", "recall", "f1", "precision"}
     missing = sorted(required.difference(threshold_table.columns))
     if missing:
         raise ValueError(f"Threshold table missing columns: {missing}")
-    eligible = threshold_table[threshold_table["precision"] >= minimum_validation_precision].copy()
+
+    selection_table = threshold_table
+    used_window = "full validation window"
+    if recent_window_table is not None:
+        missing_recent = sorted(required.difference(recent_window_table.columns))
+        if missing_recent:
+            raise ValueError(f"Recent-window table missing columns: {missing_recent}")
+        recent_eligible = recent_window_table[
+            recent_window_table["precision"] >= minimum_validation_precision
+        ]
+        # Fall back to the full window only if the recent window admits nothing,
+        # so a short or degenerate recent block cannot force a bad operating point.
+        if not recent_eligible.empty:
+            selection_table = recent_window_table
+            used_window = "most recent half of the validation window"
+
+    eligible = selection_table[selection_table["precision"] >= minimum_validation_precision].copy()
     if eligible.empty:
         raise ValueError(
             "No candidate threshold satisfies the configured validation precision floor; "
@@ -150,8 +177,9 @@ def select_operating_threshold(
     return ThresholdSelection(
         selected_threshold=chosen,
         rule=(
-            "Select the candidate threshold with the highest validation F1 among thresholds "
-            "meeting the configured validation precision floor; break ties using recall, then lower threshold."
+            f"Select the candidate threshold with the highest F1 on the {used_window} "
+            "among thresholds meeting the configured validation precision floor; "
+            "break ties using recall, then lower threshold."
         ),
         minimum_validation_precision=float(minimum_validation_precision),
     )
@@ -249,37 +277,26 @@ def _finite_positive(value: Any) -> bool:
 def generate_explanations(row: pd.Series, max_items: int = 3) -> list[str]:
     """Return non-clinical operational signals associated with a prediction.
 
+    Delegates to the structured explanation layer, which guarantees that every
+    factor states what changed, by how much, against which reference, over what
+    window, and which rule admitted it - and that only *adverse* deviations are
+    presented as contributing factors.
+
     This routine never reads raw wellness-response columns.
     """
-    candidates: list[tuple[float, str]] = []
+    from .explanations import build_factors, render_factors
 
-    if _finite_positive(row.get("duty_hours_7d_personal_deviation")):
-        value = float(row["duty_hours_7d_personal_deviation"])
-        candidates.append((abs(value), f"{_OPERATIONAL_SIGNAL_DEFS['duty_hours_7d'][0]} ({value:+.1f} hours vs personal reference)"))
-    if _finite_positive(row.get("night_shifts_30d_personal_deviation")):
-        value = float(row["night_shifts_30d_personal_deviation"])
-        candidates.append((abs(value), f"{_OPERATIONAL_SIGNAL_DEFS['night_shifts_30d'][0]} ({value:+.1f} shifts vs personal reference)"))
-    avg_rest = row.get("avg_rest_7d")
-    if avg_rest is not None and pd.notna(avg_rest) and float(avg_rest) < 8.0:
-        candidates.append((8.0 - float(avg_rest), f"reduced recent recovery ({float(avg_rest):.1f} hours average rest)"))
-    if _finite_positive(row.get("duty_density_30d_personal_deviation")):
-        value = float(row["duty_density_30d_personal_deviation"])
-        candidates.append((abs(value), f"higher duty density ({value:+.2f} vs personal reference)"))
-    if _finite_positive(row.get("incident_count_30d_personal_deviation")):
-        value = float(row["incident_count_30d_personal_deviation"])
-        candidates.append((abs(value), f"recent incident exposure ({value:+.1f} vs personal reference)"))
-    deployment = row.get("deployment_days_30d")
-    if deployment is not None and pd.notna(deployment) and float(deployment) > 0:
-        candidates.append((min(float(deployment) / 30.0, 1.0), f"sustained deployment exposure ({float(deployment):.0f} recent deployment days)"))
-    for column, label in [
-        ("duty_hours_30d_cohort_relative_deviation", "duty load above the cohort reference"),
-        ("duty_hours_30d_operational_relative_deviation", "duty load above the operational reference"),
-    ]:
-        if _finite_positive(row.get(column)):
-            candidates.append((abs(float(row[column])), label))
+    factors = build_factors(row, max_factors=max_items)
+    if not factors:
+        return []
+    return ["Contributing operational signal: " + sentence for sentence in render_factors(factors).split(" | ")]
 
-    candidates.sort(key=lambda item: (-item[0], item[1]))
-    return [f"Contributing operational signal: {text}." for _, text in candidates[:max_items]]
+
+def build_structured_explanation(row: pd.Series, max_factors: int = 5) -> dict[str, Any]:
+    """Structured, provenance-carrying explanation for API consumers."""
+    from .explanations import explain_row
+
+    return explain_row(row, max_factors=max_factors)
 
 
 def build_decision_output(

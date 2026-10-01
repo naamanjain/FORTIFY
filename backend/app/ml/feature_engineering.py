@@ -202,7 +202,7 @@ class FeatureEngineer:
             "duty_event_count", "duty_day", "training_hours", "incident_count",
             "high_intensity_incident_count", "incident_recovery_requirement",
         ]
-        x[numeric_zero] = x[numeric_zero].fillna(0)
+        x[numeric_zero] = x[numeric_zero].infer_objects(copy=False).fillna(0)
         x["duty_hours_1d"] = x["duty_hours"]
         x["avg_rest"] = x["avg_rest"].astype(float)
         x["min_rest"] = x["min_rest"].astype(float)

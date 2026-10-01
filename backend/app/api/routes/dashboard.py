@@ -7,14 +7,20 @@ from threading import RLock
 from typing import Any
 
 import pandas as pd
-from fastapi import APIRouter, Header, HTTPException, Query
+from fastapi import APIRouter, Depends as FastAPIDepends, HTTPException, Query
 
+from app.api.dependencies import (
+    require_aggregate,
+    require_audit,
+    require_infrastructure,
+    require_welfare,
+    require_principal,
+)
 from app.core.database import check_database
 from app.core.paths import AUDIT_PATH as _DEFAULT_AUDIT_PATH
 from app.core.paths import DATA_DIR as _DEFAULT_DATA_DIR
-from app.security.audit import AuditEvent, AuditLog
-from app.security.rbac import authorize
-from app.security.security_config import AccessPurpose, SecurityRole
+from app.security.audit import AuditLog
+from app.security.principal import Principal
 from app.services.workflow import DataUnavailable, _workflow_id, get_item
 
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
@@ -27,6 +33,7 @@ _SUMMARY_CACHE: dict[str, Any] = {}
 _SUMMARY_SIGNATURE: tuple[int, int] | None = None
 _SUMMARY_CACHE_LOCK = RLock()
 _RECORD_COUNTS_CACHE: dict[str, tuple[tuple[int, ...], int]] = {}
+_EXPLANATIONS_CACHE: dict[str, Any] = {}
 
 
 def _utc_now() -> str:
@@ -47,43 +54,17 @@ def _read_csv(name: str, columns: list[str] | None = None) -> pd.DataFrame:
 
 
 def _audit_access(role: str, purpose: str, outcome: str, resource: str, details: dict[str, Any]) -> None:
+    from app.security.audit import AuditEvent
+
     AuditLog(AUDIT_PATH).append(AuditEvent(
         event_type="DASHBOARD_ACCESS", actor_role=role, purpose=purpose, outcome=outcome,
         resource=resource, timestamp=_utc_now(), details=details))
 
 
-def _authorize(role: str, purpose: str, resource: str) -> None:
-    decision = authorize(role, purpose)
-    _audit_access(role, purpose, "ALLOWED" if decision.allowed else "DENIED", resource,
-                  {"policy_version": decision.policy_version})
-    if not decision.allowed:
-        raise HTTPException(status_code=403, detail=decision.reason)
-
-
-def _require_headers(x_fortify_role: str | None, x_fortify_purpose: str | None) -> tuple[str, str]:
-    role = x_fortify_role or ""
-    purpose = x_fortify_purpose or ""
-    if not role or not purpose:
-        raise HTTPException(status_code=401, detail="Dashboard requires role and purpose headers in the prototype.")
-    return role, purpose
-
-
-def _require_welfare(role: str, purpose: str, resource: str) -> None:
-    if role != SecurityRole.WELFARE_OFFICER.value or purpose != AccessPurpose.WELFARE_SUPPORT.value:
-        _audit_access(role, purpose, "DENIED", resource,
-                      {"reason": "Individual welfare access requires welfare-support authorization."})
-        raise HTTPException(status_code=403, detail="Individual welfare access requires welfare-support authorization.")
-
-
-def _require_aggregate(role: str, purpose: str, resource: str) -> None:
-    if purpose != AccessPurpose.AGGREGATE_OPERATIONS.value:
-        _audit_access(role, purpose, "DENIED", resource,
-                      {"reason": "This view requires aggregate-operations purpose."})
-        raise HTTPException(status_code=403, detail="This view requires aggregate-operations purpose.")
-    if role not in {SecurityRole.WELFARE_OFFICER.value, SecurityRole.COMMANDER.value}:
-        _audit_access(role, purpose, "DENIED", resource,
-                      {"reason": "This view is restricted to authorized operational roles."})
-        raise HTTPException(status_code=403, detail="This view is restricted to authorized operational roles.")
+# Audit path used by the shared authorization helpers. Module-level so tests can
+# patch it in isolation alongside AUDIT_PATH.
+def _authz_audit_path():
+    return AUDIT_PATH
 
 
 def _load_phase5() -> pd.DataFrame:
@@ -105,6 +86,36 @@ def _load_phase7() -> pd.DataFrame:
         "intervention_feasibility.csv",
         ["person_id", "date", "feasibility_status", "constraint_flags", "adjustment_recommendation", "requires_human_review", "feasibility_policy_version"],
     )
+
+
+def _load_explanations() -> dict[tuple[str, str], dict[str, Any]]:
+    """Load structured explanations for flagged person-days, cached by mtime.
+
+    Explanations are written by the Phase 5 pipeline for EARLY_WARNING rows
+    only, so this file is far smaller than the decision CSVs. A missing file
+    degrades to "no structured explanation" rather than an error: the summary
+    sentence column remains available.
+    """
+    path = DATA_DIR / "explanations.jsonl"
+    if not path.exists():
+        return {}
+    signature = _artifact_signature(path)
+    cached = _EXPLANATIONS_CACHE.get("map")
+    if cached is not None and _EXPLANATIONS_CACHE.get("signature") == signature:
+        return cached
+    mapping: dict[tuple[str, str], dict[str, Any]] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        key = (str(record.get("person_id")), str(record.get("date")))
+        mapping[key] = record
+    _EXPLANATIONS_CACHE["map"] = mapping
+    _EXPLANATIONS_CACHE["signature"] = signature
+    return mapping
 
 
 def _artifact_signature(path: Path) -> int | None:
@@ -154,33 +165,63 @@ def _record_count(name: str) -> int | None:
 
 
 @router.get("/overview")
-def overview(x_fortify_role: str | None = Header(default=None), x_fortify_purpose: str | None = Header(default=None)) -> dict[str, Any]:
-    role, purpose = _require_headers(x_fortify_role, x_fortify_purpose)
-    _authorize(role, purpose, "/api/dashboard/overview")
+def overview(principal: Principal = FastAPIDepends(require_principal)) -> dict[str, Any]:
+    """Aggregate operational overview.
+
+    This endpoint returns band/priority/feasibility *counts* and never any
+    personnel identifier, so both aggregate and welfare callers may read it -
+    a welfare officer working a case list still needs the population context.
+
+    The per-person case list lives behind ``/attention``, which requires
+    welfare purpose.
+    """
+    if principal.purpose.value == "WELFARE_SUPPORT":
+        require_welfare(principal, "/api/dashboard/overview", _authz_audit_path())
+    else:
+        require_aggregate(principal, "/api/dashboard/overview", _authz_audit_path())
     df = _dashboard_frame()
     latest_date = df["date"].max()
     latest = df[df["date"] == latest_date]
     band_counts = latest["risk_band"].value_counts().to_dict()
     feasibility_counts = latest["feasibility_status"].value_counts().to_dict()
     priority_counts = latest["priority"].value_counts().to_dict()
-    recent_high = latest[latest["risk_band"].astype(str).eq("HIGH")].sort_values(["welfare_risk_probability", "person_id"], ascending=[False, True]).head(12)
+    return {"phase": "Phase 9 — Dashboard Integration", "as_of_date": latest_date,
+            "personnel_count": int(df["person_id"].nunique()),
+            "risk_band_counts": {str(k): int(v) for k, v in band_counts.items()},
+            "feasibility_counts": {str(k): int(v) for k, v in feasibility_counts.items()},
+            "priority_counts": {str(k): int(v) for k, v in priority_counts.items()},
+            "high_band_count": int((latest["risk_band"].astype(str) == "HIGH").sum()),
+            "requires_human_review_count": int(latest["requires_human_review_phase7"].fillna(False).astype(bool).sum()),
+            "data_policy": "Aggregate counts only; no personnel identifiers and no raw wellness responses are exposed."}
+
+
+@router.get("/attention")
+def attention(limit: int = Query(default=25, ge=1, le=100),
+              principal: Principal = FastAPIDepends(require_principal)) -> dict[str, Any]:
+    """Per-person cases needing human review. Welfare purpose only."""
+    require_welfare(principal, "/api/dashboard/attention", _authz_audit_path())
+    df = _dashboard_frame()
+    latest_date = df["date"].max()
+    latest = df[df["date"] == latest_date]
+    recent_high = latest[latest["risk_band"].astype(str).eq("HIGH")].sort_values(
+        ["welfare_risk_probability", "person_id"], ascending=[False, True]
+    ).head(limit)
     cases = [
-        {"person_id": str(r.person_id), "date": str(r.date), "risk_probability": float(r.welfare_risk_probability), "risk_band": str(r.risk_band),
-         "recommended_action": str(r.recommended_action), "priority": str(r.priority), "feasibility_status": str(r.feasibility_status),
+        {"person_id": str(r.person_id), "date": str(r.date),
+         "risk_probability": float(r.welfare_risk_probability), "risk_band": str(r.risk_band),
+         "recommended_action": str(r.recommended_action), "priority": str(r.priority),
+         "feasibility_status": str(r.feasibility_status),
          "requires_human_review": bool(r.requires_human_review_phase7)}
         for r in recent_high.itertuples(index=False)
     ]
-    return {"phase": "Phase 9 — Dashboard Integration", "as_of_date": latest_date, "personnel_count": int(df["person_id"].nunique()),
-            "risk_band_counts": {str(k): int(v) for k, v in band_counts.items()},
-            "feasibility_counts": {str(k): int(v) for k, v in feasibility_counts.items()},
-            "priority_counts": {str(k): int(v) for k, v in priority_counts.items()}, "high_priority_cases": cases,
-            "data_policy": "Operational summaries only; raw wellness responses are not exposed."}
+    return {"as_of_date": latest_date, "cases": cases, "count": len(cases),
+            "privacy_note": "Individual welfare detail; requires welfare-support authorization."}
 
 
 @router.get("/trend")
-def trend(days: int = Query(default=30, ge=7, le=90), x_fortify_role: str | None = Header(default=None), x_fortify_purpose: str | None = Header(default=None)) -> dict[str, Any]:
-    role, purpose = _require_headers(x_fortify_role, x_fortify_purpose)
-    _authorize(role, purpose, "/api/dashboard/trend")
+def trend(days: int = Query(default=30, ge=7, le=90),
+          principal: Principal = FastAPIDepends(require_principal)) -> dict[str, Any]:
+    require_aggregate(principal, "/api/dashboard/trend", _authz_audit_path())
     df = _dashboard_frame(); dates = sorted(df["date"].unique())[-days:]; recent = df[df["date"].isin(dates)]
     grouped = recent.groupby("date", sort=True).agg(
         average_probability=("welfare_risk_probability", "mean"),
@@ -192,9 +233,8 @@ def trend(days: int = Query(default=30, ge=7, le=90), x_fortify_role: str | None
 
 
 @router.get("/units")
-def units(x_fortify_role: str | None = Header(default=None), x_fortify_purpose: str | None = Header(default=None)) -> dict[str, Any]:
-    role, purpose = _require_headers(x_fortify_role, x_fortify_purpose)
-    _authorize(role, purpose, "/api/dashboard/units")
+def units(principal: Principal = FastAPIDepends(require_principal)) -> dict[str, Any]:
+    require_aggregate(principal, "/api/dashboard/units", _authz_audit_path())
     df = _dashboard_frame(); personnel = _read_csv("personnel.csv", ["person_id", "unit_id"]); latest_date = df["date"].max()
     latest = df[df["date"] == latest_date].merge(personnel, on="person_id", how="left", validate="many_to_one")
     summary = latest.groupby("unit_id", dropna=False).agg(
@@ -205,10 +245,8 @@ def units(x_fortify_role: str | None = Header(default=None), x_fortify_purpose: 
 
 
 @router.get("/unit/{unit_id}")
-def unit_detail(unit_id: str, x_fortify_role: str | None = Header(default=None), x_fortify_purpose: str | None = Header(default=None)) -> dict[str, Any]:
-    role, purpose = _require_headers(x_fortify_role, x_fortify_purpose)
-    _authorize(role, purpose, f"/api/dashboard/unit/{unit_id}")
-    _require_aggregate(role, purpose, f"/api/dashboard/unit/{unit_id}")
+def unit_detail(unit_id: str, principal: Principal = FastAPIDepends(require_principal)) -> dict[str, Any]:
+    require_aggregate(principal, f"/api/dashboard/unit/{unit_id}", _authz_audit_path())
     df = _dashboard_frame().merge(_read_csv("personnel.csv", ["person_id", "unit_id"]), on="person_id", how="left", validate="many_to_one")
     scoped = df[df["unit_id"].astype(str) == unit_id]
     if scoped.empty:
@@ -226,16 +264,20 @@ def unit_detail(unit_id: str, x_fortify_role: str | None = Header(default=None),
 
 
 @router.get("/person/{person_id}")
-def person_detail(person_id: str, x_fortify_role: str | None = Header(default=None), x_fortify_purpose: str | None = Header(default=None)) -> dict[str, Any]:
-    role, purpose = _require_headers(x_fortify_role, x_fortify_purpose)
-    _authorize(role, purpose, f"/api/dashboard/person/{person_id}")
-    _require_welfare(role, purpose, f"/api/dashboard/person/{person_id}")
+def person_detail(person_id: str, principal: Principal = FastAPIDepends(require_principal)) -> dict[str, Any]:
+    require_welfare(principal, f"/api/dashboard/person/{person_id}", _authz_audit_path())
     df = _dashboard_frame(); person = df[df["person_id"].astype(str) == person_id].sort_values("date")
     if person.empty: raise HTTPException(status_code=404, detail="Personnel record not found")
     history = person.tail(30)
     latest = history.iloc[-1]
     identity = _read_csv("personnel.csv", ["person_id", "unit_id", "role", "deployment_type"])
-    identity_row = identity[identity["person_id"].astype(str) == person_id].iloc[0]
+    identity_matches = identity[identity["person_id"].astype(str) == person_id]
+    # A person can appear in the decision stream without a personnel row. That
+    # is a data-integrity problem, not a crash: report it as not-found rather
+    # than raising IndexError and returning 500.
+    if identity_matches.empty:
+        raise HTTPException(status_code=404, detail="Personnel record not found")
+    identity_row = identity_matches.iloc[0]
     workflow_id = _workflow_id(person_id, str(latest["date"]))
     try:
         workflow_item = get_item(workflow_id)
@@ -254,35 +296,43 @@ def person_detail(person_id: str, x_fortify_role: str | None = Header(default=No
                        "adjustment_recommendation": str(latest.get("adjustment_recommendation", "") or "")},
             "history": [{"date": str(r.date), "risk_probability": float(r.welfare_risk_probability), "risk_band": str(r.risk_band), "feasibility_status": str(r.feasibility_status)} for r in history.itertuples(index=False)],
             "workflow": workflow_payload,
+            "explanation": _load_explanations().get((person_id, str(latest["date"]))),
             "privacy_note": "Raw wellness/self-report responses are not exposed by the dashboard API."}
 
 
 @router.get("/personnel")
 def personnel(query: str = Query(default="", max_length=40), unit_id: str | None = Query(default=None, max_length=40), risk_band: str | None = Query(default=None), limit: int = Query(default=50, ge=1, le=100),
-              x_fortify_role: str | None = Header(default=None), x_fortify_purpose: str | None = Header(default=None)) -> dict[str, Any]:
-    role, purpose = _require_headers(x_fortify_role, x_fortify_purpose); _authorize(role, purpose, "/api/dashboard/personnel")
-    _require_welfare(role, purpose, "/api/dashboard/personnel")
+              principal: Principal = FastAPIDepends(require_principal)) -> dict[str, Any]:
+    require_welfare(principal, "/api/dashboard/personnel", _authz_audit_path())
     df = _dashboard_frame().merge(_read_csv("personnel.csv", ["person_id", "unit_id"]), on="person_id", how="left", validate="many_to_one")
     latest = df.sort_values("date").groupby("person_id", as_index=False).tail(1)
     if query: latest = latest[latest["person_id"].astype(str).str.contains(query, case=False, regex=False)]
     if unit_id: latest = latest[latest["unit_id"].astype(str) == unit_id]
     if risk_band: latest = latest[latest["risk_band"].astype(str) == risk_band]
+    # Filter, then page, so `total` reflects the full filtered result set and the
+    # client can tell "page 1 of N" from "these are all of them".
+    total_matching = int(len(latest))
     latest = latest.sort_values(["risk_band", "welfare_risk_probability", "person_id"], ascending=[True, False, True]).head(limit)
     items = [{"person_id": str(r.person_id), "unit_id": str(r.unit_id), "date": str(r.date), "risk_band": str(r.risk_band), "risk_probability": float(r.welfare_risk_probability),
               "recommended_action": str(r.recommended_action), "priority": str(r.priority), "feasibility_status": str(r.feasibility_status)} for r in latest.itertuples(index=False)]
-    return {"items": items, "count": len(items), "total_personnel": int(df["person_id"].nunique()), "privacy_note": "Individual operational welfare detail requires welfare-support authorization."}
+    return {"items": items, "count": len(items), "total_personnel": int(df["person_id"].nunique()),
+            "total_matching": total_matching, "limit": limit,
+            "truncated": total_matching > len(items),
+            "privacy_note": "Individual operational welfare detail requires welfare-support authorization."}
 
 
 @router.get("/search")
-def search(query: str = Query(min_length=1, max_length=50), limit: int = Query(default=12, ge=1, le=30), x_fortify_role: str | None = Header(default=None), x_fortify_purpose: str | None = Header(default=None)) -> dict[str, Any]:
-    role, purpose = _require_headers(x_fortify_role, x_fortify_purpose); _authorize(role, purpose, "/api/dashboard/search")
+def search(query: str = Query(min_length=1, max_length=50), limit: int = Query(default=12, ge=1, le=30),
+           principal: Principal = FastAPIDepends(require_principal)) -> dict[str, Any]:
     q = query.strip().lower(); results: list[dict[str, Any]] = []
     units_df = _read_csv("personnel.csv", ["person_id", "unit_id"]).drop_duplicates()
     matching_units = sorted(set(units_df.loc[units_df["unit_id"].astype(str).str.lower().str.contains(q, regex=False), "unit_id"].astype(str)))
-    if purpose == AccessPurpose.AGGREGATE_OPERATIONS.value:
+    # Aggregate purpose sees units only; welfare purpose additionally sees
+    # individual personnel. This branch is the purpose check.
+    if principal.purpose.value == "AGGREGATE_OPERATIONS":
         for unit in matching_units[:limit]: results.append({"type": "UNIT", "key": unit, "title": unit, "detail": "Aggregate operational context"})
         return {"query": query, "results": results, "privacy_note": "Aggregate search does not expose individual personnel records."}
-    _require_welfare(role, purpose, "/api/dashboard/search")
+    require_welfare(principal, "/api/dashboard/search", _authz_audit_path())
     for person in sorted(set(units_df.loc[units_df["person_id"].astype(str).str.lower().str.contains(q, regex=False), "person_id"].astype(str)))[:limit]:
         results.append({"type": "PERSONNEL", "key": person, "title": person, "detail": "Authorized welfare profile"})
     for unit in matching_units[:max(0, limit-len(results))]: results.append({"type": "UNIT", "key": unit, "title": unit, "detail": "Aggregate operational context"})
@@ -290,9 +340,8 @@ def search(query: str = Query(min_length=1, max_length=50), limit: int = Query(d
 
 
 @router.get("/data-sources")
-def data_sources(x_fortify_role: str | None = Header(default=None), x_fortify_purpose: str | None = Header(default=None)) -> dict[str, Any]:
-    role, purpose = _require_headers(x_fortify_role, x_fortify_purpose); _authorize(role, purpose, "/api/dashboard/data-sources")
-    _require_aggregate(role, purpose, "/api/dashboard/data-sources")
+def data_sources(principal: Principal = FastAPIDepends(require_principal)) -> dict[str, Any]:
+    require_aggregate(principal, "/api/dashboard/data-sources", _authz_audit_path())
     specs = [("Duty records", "duty_events.csv", "Operational"), ("Recovery", "recovery_events.csv", "Operational"), ("Leave", "leave_events.csv", "Operational"),
              ("Deployment", "deployment_events.csv", "Operational"), ("Training", "training_events.csv", "Operational"), ("Incidents", "incident_events.csv", "Operational"),
              ("Personnel", "personnel.csv", "Restricted context"), ("Risk decisions", "risk_decisions.csv", "Derived"), ("Recommendations", "intervention_recommendations.csv", "Derived"),
@@ -310,27 +359,60 @@ def data_sources(x_fortify_role: str | None = Header(default=None), x_fortify_pu
 
 
 @router.get("/audit")
-def audit_view(limit: int = Query(default=25, ge=1, le=100), x_fortify_role: str | None = Header(default=None), x_fortify_purpose: str | None = Header(default=None)) -> dict[str, Any]:
-    role, purpose = _require_headers(x_fortify_role, x_fortify_purpose); _authorize(role, purpose, "/api/dashboard/audit")
-    if role != SecurityRole.AUDITOR.value or purpose != AccessPurpose.AUDIT.value:
-        raise HTTPException(status_code=403, detail="Audit view requires auditor authorization.")
-    log = AuditLog(AUDIT_PATH); events = []
+def audit_view(limit: int = Query(default=25, ge=1, le=100),
+               principal: Principal = FastAPIDepends(require_principal)) -> dict[str, Any]:
+    require_audit(principal, "/api/dashboard/audit", _authz_audit_path())
+    log = AuditLog(AUDIT_PATH); events = []; malformed = 0
     if AUDIT_PATH.exists():
-        for line in AUDIT_PATH.read_text(encoding="utf-8").splitlines()[-limit:]:
-            if line.strip():
-                record = json.loads(line); details = record.get("details", {})
-                events.append({"event_type": record.get("event_type"), "actor_role": record.get("actor_role"), "purpose": record.get("purpose"),
-                               "outcome": record.get("outcome"), "resource": record.get("resource"), "timestamp": record.get("timestamp"), "details": details})
-    return {"chain_valid": log.verify_chain(), "event_count": len(events), "events": events, "privacy_note": "Audit output contains governance metadata only; raw wellness responses are excluded."}
+        lines = [line for line in AUDIT_PATH.read_text(encoding="utf-8").splitlines()[-limit:] if line.strip()]
+        for line in lines:
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                # A truncated final record (crash mid-append, full disk) must not
+                # take down the audit view - that is exactly when an auditor
+                # most needs to read it. Count it and surface it instead.
+                malformed += 1
+                continue
+            events.append({"event_type": record.get("event_type"), "actor_role": record.get("actor_role"), "purpose": record.get("purpose"),
+                           "outcome": record.get("outcome"), "resource": record.get("resource"), "timestamp": record.get("timestamp"),
+                           "details": _redact_details(record.get("details", {}))})
+    verification = log.verify()
+    return {"chain_valid": verification.valid, "chain_reason": verification.reason,
+            "audit_records": verification.records, "audit_anchored": verification.anchored,
+            "malformed_records": malformed,
+            "event_count": len(events), "events": events,
+            "privacy_note": "Audit output contains governance metadata only; raw wellness responses and direct personnel identifiers are excluded."}
+
+
+# Detail keys that carry a direct personnel identifier. The audit log keeps the
+# full value on disk (it is the evidentiary record); the read API redacts it so
+# the governance screen does not become a de facto personnel export.
+_REDACTED_DETAIL_KEYS = {"person_id"}
+
+
+def _redact_details(details: Any) -> Any:
+    if not isinstance(details, dict):
+        return details
+    return {
+        key: ("[redacted:personnel-identifier]" if key in _REDACTED_DETAIL_KEYS else _redact_details(value) if isinstance(value, dict) else value)
+        for key, value in details.items()
+    }
 
 
 @router.get("/system-health")
-def system_health(x_fortify_role: str | None = Header(default=None), x_fortify_purpose: str | None = Header(default=None)) -> dict[str, Any]:
-    role, purpose = _require_headers(x_fortify_role, x_fortify_purpose); _authorize(role, purpose, "/api/dashboard/system-health")
-    if role not in {SecurityRole.SYSTEM_ADMINISTRATOR.value, SecurityRole.AUDITOR.value}:
+def system_health(principal: Principal = FastAPIDepends(require_principal)) -> dict[str, Any]:
+    # Health is intentionally readable by BOTH the infrastructure administrator
+    # and the auditor: verifying the audit chain's health is part of an
+    # auditor's job. It exposes no personnel data.
+    if principal.purpose.value == "INFRASTRUCTURE_ADMIN":
+        require_infrastructure(principal, "/api/dashboard/system-health", _authz_audit_path())
+    elif principal.purpose.value == "AUDIT":
+        require_audit(principal, "/api/dashboard/system-health", _authz_audit_path())
+    else:
         raise HTTPException(status_code=403, detail="System health is restricted to administrative or audit roles.")
     db_ok = check_database()
-    audit_valid = AuditLog(AUDIT_PATH).verify_chain()
+    verification = AuditLog(AUDIT_PATH).verify()
     # Only artifacts the running API actually consumes at request time.
     artifacts = ["personnel.csv", "intervention_recommendations.csv", "intervention_feasibility.csv"]
     artifact_status = {name: (DATA_DIR / name).exists() for name in artifacts}
@@ -339,6 +421,11 @@ def system_health(x_fortify_role: str | None = Header(default=None), x_fortify_p
                             "dashboard_cache": "Warm" if cache_ready else "Cold"},
             "data": {"artifacts": artifact_status},
             "governance": {"access_control": "Prototype role/purpose headers (not authenticated)",
-                           "audit_chain": "Healthy" if audit_valid else "Failed",
+                           "auth_method": principal.auth_method,
+                           "authenticated": principal.authenticated,
+                           "audit_chain": "Healthy" if verification.valid else "Failed",
+                           "audit_chain_reason": verification.reason,
+                           "audit_records": verification.records,
+                           "audit_anchored": verification.anchored,
                            "security_boundary": "Prototype"},
             "synthetic_demo": True}

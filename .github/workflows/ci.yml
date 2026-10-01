@@ -1,9 +1,14 @@
-# FORTIFY CI — frontend build + full backend verification from a clean checkout.
+# FORTIFY CI — quality gate.
 #
 # The repository ships no generated data or models (they are 300+ MB of
 # regenerable output), so CI proves the complete chain from a fresh clone:
-# pinned install -> seed-42 regeneration -> pytest (integration tests read the
-# regenerated artifacts) -> phase validators.
+# secret scan -> tracked-artifact check -> pinned install -> seed-42
+# regeneration -> pytest -> phase validators -> model-validity probes.
+#
+# A green run here means: no secrets are committed, no regenerable output has
+# been accidentally tracked, the deterministic pipeline still reproduces,
+# every behavior test passes, and the model's validity probes (leakage,
+# contamination) still hold.
 name: CI
 
 on:
@@ -13,6 +18,40 @@ on:
     branches: [main]
 
 jobs:
+  secret-scan:
+    name: Secret scan (current tree)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Scan tracked files for credential patterns
+        run: |
+          # Fail closed on anything that looks like a real credential. Test
+          # fixtures must self-identify (e.g. "test", "example", "demo") to be
+          # allowlisted, and each allowlist hit is printed for review.
+          set -o pipefail
+          PATTERN='(AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----|xox[baprs]-[0-9A-Za-z-]+|ghp_[0-9A-Za-z]{36}|sk-[0-9A-Za-z]{20,})'
+          matches=$(git grep -nI -E "$PATTERN" -- . || true)
+          if [ -n "$matches" ]; then
+            echo "Potential secret detected:"
+            echo "$matches"
+            exit 1
+          fi
+          echo "No credential patterns in tracked files."
+
+      - name: Fail if generated artifacts become tracked
+        run: |
+          # These are produced by scripts/build_all.py and are never committed.
+          tracked=$(git ls-files -- 'data/generated/*.csv' 'artifacts/**' 'frontend/dist/**' || true)
+          if [ -n "$tracked" ]; then
+            echo "Regenerable files are tracked; the repository must ship source only:"
+            echo "$tracked"
+            exit 1
+          fi
+          echo "No regenerable artifacts tracked."
+
   frontend-build:
     name: Frontend typecheck + build (Node 24)
     runs-on: ubuntu-latest
@@ -35,9 +74,9 @@ jobs:
         run: npm run build
 
   backend-verify:
-    name: Backend tests + validators (Python 3.13, seed 42)
+    name: Backend tests + validators + validity probes (Python 3.13, seed 42)
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
@@ -75,6 +114,11 @@ jobs:
           python scripts/validate_product_experience.py
           python scripts/validate_stitch_product.py
 
+      - name: Model validity probes (leakage, contamination, baselines)
+        # Fails the build if features ever start depending on future data or on
+        # the label, or if the temporal partitions overlap.
+        run: python scripts/validate_model_validity.py
+
       - name: Upload regenerated artifacts for inspection
         if: always()
         uses: actions/upload-artifact@v4
@@ -82,6 +126,6 @@ jobs:
           name: regenerated-artifacts
           path: |
             data/generated/*_report.json
-            artifacts/
+            artifacts/model_validity/
           retention-days: 7
           if-no-files-found: error

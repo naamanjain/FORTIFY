@@ -6,6 +6,10 @@ out of sync with the completed roadmap.
 
 ## Completed
 
+- Engineering hardening pass (2026-10-01) — model-validity probes, anchored audit log, purpose
+  limitation repair, structured explanations with provenance, data-quality gate, API contract and
+  resilience suites, container healthchecks and edge rate limiting, CI secret/artifact gates
+
 - Phase 0 — Project initialization
 - Phase 1 — Synthetic operational world
 - Phase 2 — Feature engineering

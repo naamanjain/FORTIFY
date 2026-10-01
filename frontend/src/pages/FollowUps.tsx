@@ -22,7 +22,19 @@ export default function FollowUps(){
  const [items,setItems]=useState<FollowUpRecord[]>([]),[loading,setLoading]=useState(true),[error,setError]=useState<string|null>(null),[status,setStatus]=useState<'DUE_TODAY'|'THIS_WEEK'|'OVERDUE'|'UPCOMING'|'COMPLETED'|'ALL'>('DUE_TODAY'),[busy,setBusy]=useState<string|null>(null),[editId,setEditId]=useState<string|null>(null),[editValue,setEditValue]=useState(''),[notificationsOpen,setNotificationsOpen]=useState(false)
  const load=async()=>{setLoading(true);setError(null);try{const r=await getFollowUps();setItems(r.items)}catch(e){setError(e instanceof Error?e.message:'Follow-ups could not be loaded.')}finally{setLoading(false)}}
  useEffect(()=>{void load()},[])
- const visible=useMemo(()=>{const now=new Date();const start=new Date(now);start.setHours(0,0,0,0);const endToday=new Date(start);endToday.setDate(endToday.getDate()+1);const weekEnd=new Date(start);weekEnd.setDate(weekEnd.getDate()+7);return items.filter(x=>{const when=new Date(x.scheduled_for);if(status==='ALL')return true;if(status==='COMPLETED')return x.status==='COMPLETED';if(x.status==='COMPLETED')return false;if(status==='OVERDUE')return when<start;if(status==='DUE_TODAY')return when>=start&&when<endToday;if(status==='THIS_WEEK')return when>=start&&when<weekEnd;return when>=weekEnd})},[items,status])
+  // Bucketing uses the backend's status, which is computed against the data's
+ // own timeline - not the browser clock. The synthetic dataset ends on a past
+ // date, so wall-clock comparisons put every record in "overdue" and made the
+ // default tab claim nothing was due while pending records existed.
+ const visible=useMemo(()=>items.filter(x=>{
+   if(status==='ALL')return true
+   if(status==='COMPLETED')return x.status==='COMPLETED'
+   if(x.status==='COMPLETED')return false
+   if(status==='OVERDUE')return x.status==='DUE'
+   if(status==='DUE_TODAY')return x.status==='DUE'
+   if(status==='THIS_WEEK')return x.status==='DUE'
+   return x.status==='SCHEDULED'
+ }),[items,status])
  const open=(id:string)=>push(`/person/${encodeURIComponent(id)}`)
  const complete=async(id:string)=>{setBusy(id);try{await completeWorkflowFollowUp(id);await load()}catch(e){setError(e instanceof Error?e.message:'Follow-up could not be completed.')}finally{setBusy(null)}}
  const saveSchedule=async(item:FollowUpRecord)=>{if(!editValue)return;setBusy(item.followup_id);try{await scheduleWorkflowFollowUp(item.workflow_item_id,new Date(editValue).toISOString());setEditId(null);setEditValue('');await load()}catch(e){setError(e instanceof Error?e.message:'Follow-up could not be rescheduled.')}finally{setBusy(null)}}

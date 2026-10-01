@@ -63,7 +63,13 @@ Analytics-facing identifiers can be generated with deterministic HMAC-SHA256 pse
 The prototype defines four existing architectural roles and explicit access purposes. Welfare access is limited to the welfare role; commanders receive aggregate operational purpose access; infrastructure administration does not automatically grant welfare access; auditors receive audit-purpose access.
 
 ### Audit logging
-`AuditLog` writes append-only JSONL events with a SHA-256 hash chain. Verification detects tampering or chain breaks. Audit details should contain operational metadata rather than raw voluntary wellness responses.
+`AuditLog` writes append-only JSONL events with a SHA-256 hash chain plus an **anchored head**: the record count and final hash are mirrored to a separate anchor file, signed with HMAC-SHA256 under a key held outside the log (`FORTIFY_AUDIT_HMAC_KEY`, or a generated key file stored with owner-only permissions in the prototype). This makes three attacks detectable that a bare hash chain cannot see:
+
+- **Mid-chain edit** — breaks every later hash link (chain check).
+- **Truncation** — the log no longer matches the anchor's count/head (anchor check). A bare chain verifies `True` on any prefix.
+- **Full-history rewrite** — recomputing every hash changes the head, which the signed anchor pins; an attacker cannot forge the anchor signature without the key.
+
+Verification is fail-closed: a log with records but no anchor, or with an unreadable tail, reports invalid, and appending to a damaged log is refused rather than silently overwritten. In the prototype the key is stored beside the log, so a user who can write both can still rewrite history; a production deployment must hold the key in a secret manager or HSM. Audit details contain operational metadata rather than raw voluntary wellness responses, and the audit read API redacts direct personnel identifiers from `details`.
 
 ### Trusted computation boundary
 The prototype exposes an explicit boundary object requiring protected input before analytics/inference execution. `hardware_tee=False` is intentional. Production architecture may later bind this boundary to confidential-computing hardware, remote attestation, and hardware-backed key release.

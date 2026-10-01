@@ -2,7 +2,7 @@ import type { ReactNode } from 'react'
 import { useEffect, useState } from 'react'
 import { GlobalSearch } from './GlobalSearch'
 import { Icon, type IconName } from './Icon'
-import { FORTIFY_PURPOSE, FORTIFY_ROLE, searchDashboard } from '../services/api'
+import { currentAccess, FORTIFY_PURPOSE, FORTIFY_ROLE, PURPOSE, searchDashboard } from '../services/api'
 
 type NavItem = { id: string; label: string; path: string; icon: IconName }
 type SearchResult = { type: 'PERSONNEL' | 'UNIT'; key: string; title: string; detail: string }
@@ -24,11 +24,17 @@ export function AppShell({ navItems, activePath, query, searchResults, searchOpe
   const [globalQuery, setGlobalQuery] = useState(query)
   const [globalResults, setGlobalResults] = useState<SearchResult[]>(searchResults)
   const [globalOpen, setGlobalOpen] = useState(searchOpen)
+  const [searchError, setSearchError] = useState<string | null>(null)
 
   useEffect(() => {
-    if (!searchEnabled || !globalQuery.trim()) { setGlobalResults([]); return }
+    if (!searchEnabled || !globalQuery.trim()) { setGlobalResults([]); setSearchError(null); return }
     const handle = window.setTimeout(() => {
-      void searchDashboard(globalQuery.trim()).then(r => setGlobalResults(r.results as SearchResult[])).catch(() => setGlobalResults([]))
+      void searchDashboard(globalQuery.trim(), PURPOSE.WELFARE_SUPPORT)
+        .then(r => { setGlobalResults(r.results as SearchResult[]); setSearchError(null) })
+        .catch((e: Error) => {
+          // A failed lookup must not present itself as "nothing found".
+          setGlobalResults([]); setSearchError(e.message)
+        })
     }, 140)
     return () => window.clearTimeout(handle)
   }, [globalQuery, searchEnabled])
@@ -62,14 +68,23 @@ export function AppShell({ navItems, activePath, query, searchResults, searchOpe
         })}
       </nav>
       <div className="sidebar-spacer" />
-      <div className="sidebar-footer"><div className="access-label">CURRENT ACCESS</div><strong>{role}</strong><span>Purpose: {purpose}</span></div>
+      {/* This is build-time configuration, not a signed-in session. The
+          prototype has no identity provider, and the label must say so - an
+          avatar that looks like an authenticated user would misrepresent the
+          security boundary. */}
+      <div className="sidebar-footer">
+        <div className="access-label">ACCESS CONTEXT</div>
+        <strong>{role}</strong>
+        <span>Purpose: {purpose}</span>
+        <small className="access-auth-note">{currentAccess.label}</small>
+      </div>
     </aside>
     <div className="workspace">
       <header className="topbar">
-        <GlobalSearch value={effectiveQuery} results={effectiveResults} open={effectiveOpen} onChange={handleQuery} onSelect={handleSelect} />
+        <GlobalSearch value={effectiveQuery} results={effectiveResults} open={effectiveOpen} error={searchError} onChange={handleQuery} onSelect={handleSelect} />
         <div className="topbar-actions">
           <div className="purpose-compact"><span>{role}</span><strong>{purpose}</strong></div>
-          <div className="user-menu"><span className="user-avatar">{role.split(' ').map(x => x[0]).slice(0,2).join('')}</span><span className="user-menu-text"><strong>{role}</strong><small>{purpose}</small></span></div>
+          <div className="user-menu"><span className="user-avatar" title={currentAccess.label}>{role.split(' ').map(x => x[0]).slice(0,2).join('')}</span><span className="user-menu-text"><strong>{role}</strong><small>Not authenticated</small></span></div>
         </div>
       </header>
       <main className="page-content">{children}</main>

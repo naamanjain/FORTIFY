@@ -9,7 +9,7 @@ function concern(item: Row) {
   return ['No current concern', 'low'] as const
 }
 function status(value: WorkflowItem['workflow_state']) { const labels: Record<WorkflowItem['workflow_state'], string> = { NEW:'New', ACKNOWLEDGED:'Acknowledged', IN_REVIEW:'Being reviewed', SUPPORT_PLANNED:'Support planned', SUPPORT_COMPLETED:'Support completed', FOLLOW_UP_SCHEDULED:'Follow-up scheduled', FOLLOW_UP_DUE:'Follow-up due', FOLLOW_UP_COMPLETED:'Follow-up completed', CLOSED:'Closed', COMPLETED:'Completed', DEFERRED:'Deferred', DISMISSED:'Dismissed' }; return labels[value] }
-export function AttentionTable({ rows, onOpen }: { rows: Row[]; onOpen: (personId: string) => void }) {
+export function AttentionTable({ rows, onOpen, asOfDate }: { rows: Row[]; onOpen: (personId: string) => void; asOfDate?: string }) {
   return <div className="data-table-wrap">
     <div className="table-scroll">
       <table className="data-table">
@@ -25,6 +25,8 @@ export function AttentionTable({ rows, onOpen }: { rows: Row[]; onOpen: (personI
         </tr>})}</tbody>
       </table>
     </div>
-    <div className="table-footer"><span>{rows.length} active cases shown</span><span>Latest available day</span></div>
+    {/* Post-filter count, and the data day the rows belong to - both stated
+        so the table cannot be mistaken for a complete population view. */}
+    <div className="table-footer"><span>{rows.length} cases shown after filtering</span><span>{asOfDate ? `Data day: ${asOfDate}` : 'Latest available day'}</span></div>
   </div>
 }

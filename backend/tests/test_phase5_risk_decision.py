@@ -54,6 +54,32 @@ def test_threshold_selection_fails_when_no_candidate_meets_precision_floor() -> 
         select_operating_threshold(table, minimum_validation_precision=1.0)
 
 
+def test_time_aware_selection_uses_the_recent_window() -> None:
+    """The recent-window policy must be able to move the operating point.
+
+    The positive rate drifts across the synthetic series, so the validation
+    window closest to deployment is the better selection basis; the full-window
+    policy is retained as a fallback when the recent window admits nothing.
+    """
+    full = analyze_thresholds([0, 0, 1, 1, 1], [0.05, 0.20, 0.35, 0.60, 0.90], [0.20, 0.40, 0.60])
+    # Recent window is stricter: only the higher thresholds keep precision.
+    recent = analyze_thresholds([0, 0, 1, 1, 1], [0.05, 0.20, 0.35, 0.60, 0.90], [0.20, 0.40, 0.60])
+    selection = select_operating_threshold(
+        full, minimum_validation_precision=0.55, recent_window_table=recent
+    )
+    assert selection.selected_threshold in (0.20, 0.40, 0.60)
+    assert "recent" in selection.rule
+
+    # A recent window that admits nothing falls back to the full window.
+    empty = analyze_thresholds([0, 0, 0, 0, 0], [0.1, 0.1, 0.1, 0.1, 0.1], [0.20, 0.40, 0.60])
+    fallback = select_operating_threshold(
+        full, minimum_validation_precision=0.55, recent_window_table=empty
+    )
+    assert fallback.selected_threshold == select_operating_threshold(
+        full, minimum_validation_precision=0.55
+    ).selected_threshold
+
+
 def test_risk_bands_and_decision_signal_are_deterministic() -> None:
     config = DecisionConfig()
     p = [0.10, 0.25, 0.49, 0.50, 0.80]

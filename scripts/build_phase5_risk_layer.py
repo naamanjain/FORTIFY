@@ -79,9 +79,30 @@ def main() -> int:
         valid_calibrated,
         decision_config.decision_threshold_candidates,
     )
+
+    # Time-aware selection: the most recent half of the validation window is
+    # the closest available proxy for the population the model will operate on.
+    # The held-out test window is never consulted here; it is reported later so
+    # the model card can state how each policy transferred.
+    valid_dates = sorted(valid["date"].unique())
+    if len(valid_dates) >= 4:
+        mid = valid_dates[len(valid_dates) // 2]
+        recent = valid[valid["date"] >= mid]
+        recent_calibrated = apply_calibrator(calibrator, model.predict_proba(recent[feature_columns])[:, 1])
+        recent_threshold_table = analyze_thresholds(
+            recent["target"], recent_calibrated, decision_config.decision_threshold_candidates,
+        )
+    else:
+        recent_threshold_table = None
+        recent = None
+    full_window_selection = select_operating_threshold(
+        threshold_table,
+        minimum_validation_precision=decision_config.minimum_validation_precision,
+    )
     selection = select_operating_threshold(
         threshold_table,
         minimum_validation_precision=decision_config.minimum_validation_precision,
+        recent_window_table=recent_threshold_table,
     )
 
     validation_calibration = calibration_diagnostics(valid["target"], valid_calibrated, decision_config.calibration_bins)
@@ -99,6 +120,38 @@ def main() -> int:
         config=decision_config,
     )
     output.to_csv(ROOT / args.prediction_output, index=False)
+
+    # Structured, provenance-carrying explanations for flagged person-days on
+    # the latest decision date - the day the dashboard actually displays. The
+    # API's person profile reads this file, so it is deliberately small; a
+    # full-history explanation file would cost hundreds of megabytes for data
+    # no screen requests.
+    from backend.app.ml.explanations import explain_row
+
+    latest_date = output["date"].max()
+    is_latest = output["date"] == latest_date
+    is_flagged = output["threshold_decision"] == "EARLY_WARNING"
+    explanation_positions = np.flatnonzero((is_latest & is_flagged).to_numpy())
+    explanation_rows = []
+    for position in explanation_positions:
+        row = aligned_features.iloc[position]
+        record = explain_row(row, max_factors=5)
+        record.update({
+            "person_id": str(output.iloc[position]["person_id"]),
+            "date": str(output.iloc[position]["date"]),
+            "model_version": "phase5-v1",
+            "selected_threshold": float(selection.selected_threshold),
+        })
+        explanation_rows.append(record)
+
+    explanation_path = ROOT / "data" / "generated" / "explanations.jsonl"
+    with explanation_path.open("w", encoding="utf-8") as handle:
+        for record in explanation_rows:
+            handle.write(json.dumps(record, sort_keys=True) + "\n")
+    print(
+        f"Structured explanations written: {len(explanation_rows):,} flagged cases "
+        f"for latest decision date {latest_date}"
+    )
 
     threshold_table.to_csv(output_dir / "threshold_analysis.csv", index=False)
     joblib.dump(calibrator, output_dir / "platt_calibrator.joblib")
@@ -130,10 +183,19 @@ def main() -> int:
             "candidate_thresholds": list(decision_config.decision_threshold_candidates),
             "selection": config_dict(selection),
             "selected_threshold": selection.selected_threshold,
+            "full_window_policy_threshold": full_window_selection.selected_threshold,
             "validation_operating_point": validation_operating,
             "test_operating_point": test_operating,
             "test_labels_not_used_for_selection": True,
-            "rationale": "Triage operation: among validation thresholds meeting the precision floor, pick the highest F1 so the review queue prioritizes instead of flagging most of the population. The floor is prototype tuning and requires real-world policy review before operational use.",
+            "rationale": (
+                "Triage operation: among validation thresholds meeting the precision floor, "
+                "pick the highest F1 so the review queue prioritizes instead of flagging most "
+                "of the population. The floor is prototype tuning and requires real-world "
+                "policy review before operational use. Selection uses the most recent half of "
+                "the validation window because the positive rate drifts across the synthetic "
+                "series and the window closest to deployment best represents it; both "
+                "policies' thresholds are recorded for transparency."
+            ),
         },
         "risk_bands": {
             "LOW": f"probability < {decision_config.low_band_upper}",
@@ -170,7 +232,12 @@ def main() -> int:
     }
     (output_dir / "model_card.json").write_text(json.dumps(model_card, indent=2, sort_keys=True), encoding="utf-8")
     (output_dir / "calibration_report.json").write_text(
-        json.dumps({"validation": validation_calibration, "test": test_calibration}, indent=2, sort_keys=True),
+        json.dumps({
+            "validation": validation_calibration,
+            "test": test_calibration,
+            "selected_threshold": selection.selected_threshold,
+            "selection_rule": config_dict(selection),
+        }, indent=2, sort_keys=True),
         encoding="utf-8",
     )
 

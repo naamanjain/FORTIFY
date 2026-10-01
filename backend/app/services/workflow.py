@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import sqlite3
 from contextlib import contextmanager
@@ -127,6 +128,7 @@ def initialize_workflow_store() -> None:
             feedback_id TEXT PRIMARY KEY, workflow_item_id TEXT NOT NULL, support_event_id TEXT NOT NULL,
             person_id TEXT NOT NULL, helpfulness INTEGER NOT NULL, comment TEXT,
             follow_up_requested INTEGER NOT NULL, submitted_at TEXT NOT NULL, recorded_by_role TEXT NOT NULL,
+            idempotency_key TEXT,
             FOREIGN KEY (workflow_item_id) REFERENCES workflow_items(workflow_item_id),
             FOREIGN KEY (support_event_id) REFERENCES workflow_support_events(support_event_id))""")
         conn.execute("""CREATE TABLE IF NOT EXISTS workflow_followups (
@@ -143,6 +145,27 @@ def initialize_workflow_store() -> None:
         _ensure_column(conn, "workflow_items", "active_followup_id", "TEXT")
         _ensure_column(conn, "workflow_items", "feedback_submitted", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "workflow_items", "unit_id", "TEXT")
+        _ensure_column(conn, "workflow_feedback", "idempotency_key", "TEXT")
+        # Historical databases may contain duplicate feedback rows written by
+        # retried requests before this constraint existed. Keep the earliest
+        # submission for each support event - that is the one recorded at the
+        # time of the conversation - and drop the later duplicates, then
+        # enforce one-row-per-event at the database level.
+        duplicate_groups = conn.execute(
+            """SELECT COUNT(*) FROM (
+                   SELECT 1 FROM workflow_feedback
+                   GROUP BY workflow_item_id, support_event_id HAVING COUNT(*) > 1
+               )"""
+        ).fetchone()[0]
+        if duplicate_groups:
+            conn.execute(
+                """DELETE FROM workflow_feedback WHERE feedback_id NOT IN (
+                       SELECT MIN(feedback_id) FROM workflow_feedback
+                       GROUP BY workflow_item_id, support_event_id
+                   )"""
+            )
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_workflow_feedback_event ON workflow_feedback(workflow_item_id, support_event_id)")
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_workflow_feedback_idem ON workflow_feedback(idempotency_key) WHERE idempotency_key IS NOT NULL")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_workflow_items_pending ON workflow_items(workflow_state, recommendation_date, priority, workflow_item_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_workflow_audit_item ON workflow_audit_events(workflow_item_id, timestamp, event_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_workflow_followups_status ON workflow_followups(status, scheduled_for, followup_id)")
@@ -341,12 +364,26 @@ def _authorize_transition(actor_role: str, purpose: str, config: WorkflowPolicyC
 
 def _write_external_audit(event_type: str, actor_role: str, purpose: str, outcome: str, resource: str,
                           details: dict[str, Any]) -> None:
-    AuditLog(_audit_path()).append(AuditEvent(
-        event_type, actor_role, purpose, outcome, resource, datetime.now(timezone.utc).isoformat(), details))
+    """Record a workflow decision in the append-only log.
+
+    A workflow transition has already been committed to the database by the
+    time this runs, so raising here would report failure for work that actually
+    succeeded. A logging fault is surfaced through metrics and a warning
+    instead; the committed state stays authoritative.
+    """
+    from app.observability import METRICS
+
+    try:
+        AuditLog(_audit_path()).append(AuditEvent(
+            event_type, actor_role, purpose, outcome, resource, datetime.now(timezone.utc).isoformat(), details))
+    except Exception:  # noqa: BLE001 - deliberate: never fail committed work on a log write
+        METRICS.increment("audit_write_failures_total")
+        logging.getLogger("fortify").warning("audit_write_failed", extra={"event_type": event_type})
 
 
 def transition_item(workflow_item_id: str, *, new_state: str, actor_role: str, purpose: str, reason_code: str,
-                    config: WorkflowPolicyConfig | None = None) -> dict[str, Any]:
+                    config: WorkflowPolicyConfig | None = None,
+                    expected_state: str | None = None) -> dict[str, Any]:
     config = config or WorkflowPolicyConfig(); _authorize_transition(actor_role, purpose, config)
     if new_state not in WORKFLOW_STATES: raise ValueError(f"Unknown workflow state: {new_state}")
     if not reason_code.strip(): raise ValueError("reason_code is required for workflow transitions")
@@ -356,6 +393,13 @@ def transition_item(workflow_item_id: str, *, new_state: str, actor_role: str, p
         row = conn.execute("SELECT * FROM workflow_items WHERE workflow_item_id=?", (workflow_item_id,)).fetchone()
         if not row: raise KeyError("Workflow item not found")
         current = str(row["workflow_state"])
+        # Stale-client guard: a client that loaded the case before someone else
+        # moved it must not overwrite their decision with its own.
+        if expected_state is not None and expected_state != current:
+            raise ValueError(
+                f"This case changed since it was loaded (expected {expected_state}, current {current}). "
+                "Reload before acting."
+            )
         if new_state not in TRANSITIONS[current]: raise ValueError(f"Invalid workflow transition: {current} -> {new_state}")
         event_id = f"WFE-{hashlib.sha256(f'{workflow_item_id}|{current}|{new_state}|{now}'.encode()).hexdigest()[:20]}"
         if new_state in {"SUPPORT_COMPLETED", "COMPLETED"}:
@@ -388,20 +432,55 @@ def _require_welfare_actor(actor_role: str, purpose: str) -> None:
 
 
 def record_feedback(workflow_item_id: str, *, helpfulness: int, comment: str | None, follow_up_requested: bool,
-                    actor_role: str, purpose: str) -> dict[str, Any]:
+                    actor_role: str, purpose: str, idempotency_key: str | None = None) -> dict[str, Any]:
+    """Record one piece of personnel feedback for a support event.
+
+    Feedback is the outcome measurement for the welfare loop, so a retried
+    request (double-click, proxy retry, flaky mobile connection) must not write
+    a second row. Two guards apply:
+
+    * An ``Idempotency-Key`` replays the previously stored record.
+    * A UNIQUE index on ``(workflow_item_id, support_event_id)`` makes a
+      duplicate impossible at the database level, so concurrent retries that
+      race past the read still cannot both win.
+    """
     _require_welfare_actor(actor_role, purpose); ensure_workflow_items()
     if not 1 <= helpfulness <= 5: raise ValueError("helpfulness must be between 1 and 5")
     item = get_item(workflow_item_id)
     if not item: raise KeyError("Workflow item not found")
     support = item.get("support_event")
     if not support: raise ValueError("Personnel feedback requires recorded support completion.")
-    now = datetime.now(timezone.utc).isoformat(); fid = f"FB-{hashlib.sha256(f'{workflow_item_id}|{now}'.encode()).hexdigest()[:20]}"
+    support_event_id = support["support_event_id"]
+
+    # Replay path: same key, previously recorded result.
+    if idempotency_key:
+        with _connection() as conn:
+            conn.row_factory = sqlite3.Row
+            prior = conn.execute(
+                "SELECT * FROM workflow_feedback WHERE idempotency_key = ? AND workflow_item_id = ?",
+                (idempotency_key, workflow_item_id),
+            ).fetchone()
+        if prior is not None:
+            return get_item(workflow_item_id) or {}
+
+    now = datetime.now(timezone.utc).isoformat()
+    fid = f"FB-{hashlib.sha256(f'{workflow_item_id}|{now}'.encode()).hexdigest()[:20]}"
     with _connection() as conn:
-        conn.execute("INSERT INTO workflow_feedback(feedback_id,workflow_item_id,support_event_id,person_id,helpfulness,comment,follow_up_requested,submitted_at,recorded_by_role) VALUES (?,?,?,?,?,?,?,?,?)",
-                     (fid,workflow_item_id,support["support_event_id"],item["person_id"],helpfulness,(comment or "").strip() or None,int(follow_up_requested),now,actor_role))
-        conn.execute("UPDATE workflow_items SET feedback_submitted=1 WHERE workflow_item_id=?", (workflow_item_id,)); conn.commit()
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            conn.execute(
+                "INSERT INTO workflow_feedback(feedback_id,workflow_item_id,support_event_id,person_id,helpfulness,comment,follow_up_requested,submitted_at,recorded_by_role,idempotency_key) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (fid, workflow_item_id, support_event_id, item["person_id"], helpfulness,
+                 (comment or "").strip() or None, int(follow_up_requested), now, actor_role, idempotency_key))
+        except sqlite3.IntegrityError:
+            conn.rollback()
+            # Lost a race with a concurrent identical submission: treat the
+            # stored record as authoritative rather than writing a duplicate.
+            return get_item(workflow_item_id) or {}
+        conn.execute("UPDATE workflow_items SET feedback_submitted=1 WHERE workflow_item_id=?", (workflow_item_id,))
+        conn.commit()
     _write_external_audit("WORKFLOW_FEEDBACK_RECORDED", actor_role, purpose, "ALLOWED", f"/api/workflow/{workflow_item_id}/feedback",
-                          {"feedback_id":fid,"workflow_item_id":workflow_item_id,"person_id":item["person_id"],"support_event_id":support["support_event_id"],"follow_up_requested":bool(follow_up_requested)})
+                          {"feedback_id":fid,"workflow_item_id":workflow_item_id,"person_id":item["person_id"],"support_event_id":support_event_id,"follow_up_requested":bool(follow_up_requested)})
     return get_item(workflow_item_id) or {}
 
 
@@ -499,7 +578,10 @@ def complete_followup(followup_id: str, actor_role: str, purpose: str) -> dict[s
             WHERE f.followup_id=?""",(followup_id,)).fetchone()
         if not row: raise KeyError("Follow-up not found")
         workflow_id=row["wi_id"]; current=row["wi_state"]
-        if row["followup_status"] == "COMPLETED": raise ValueError("Follow-up is already completed.")
+        if row["followup_status"] == "COMPLETED":
+            # A retried completion is a successful replay, not an error: the
+            # caller asked for the state it is already in.
+            return get_item(workflow_id) or {}
         if current not in {"FOLLOW_UP_SCHEDULED","FOLLOW_UP_DUE"}: raise ValueError("Workflow is not in a follow-up state.")
         conn.execute("UPDATE workflow_followups SET status='COMPLETED',completed_at=?,completed_by_role=?,last_updated_at=? WHERE followup_id=?",(now,actor_role,now,followup_id))
         conn.execute("UPDATE workflow_items SET workflow_state='FOLLOW_UP_COMPLETED',last_transition_at=?,last_actor_role=?,last_reason_code=? WHERE workflow_item_id=?",(now,actor_role,"FOLLOW_UP_COMPLETED_BY_HUMAN",workflow_id))

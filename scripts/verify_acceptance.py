@@ -197,15 +197,18 @@ def scenario_i() -> None:
 
 def scenario_j() -> None:
     r1 = get("/api/dashboard/system-health", ADM, INFRA)
-    r2 = get("/api/dashboard/trend?days=30", WO, WS)
-    ok = r1.status_code == 200 and r2.status_code == 200
+    # Trend is an aggregate view: it requires the aggregate-operations purpose,
+    # from any role holding that purpose. Welfare purpose is correctly refused.
+    r2 = get("/api/dashboard/trend?days=30", WO, AGG)
+    r3 = get("/api/dashboard/trend?days=30", WO, WS)
+    ok = r1.status_code == 200 and r2.status_code == 200 and r3.status_code == 403
     if ok:
         payloads.append(r1.json())
         body = r2.json()
         payloads.append(body)
         ok = len(body.get("points", [])) > 0 and len(scan_forbidden(body)) == 0
-    check("J  system health (admin) + trend (WO)", ok,
-          f"health={r1.status_code} trend={r2.status_code}")
+    check("J  system health (admin) + trend (aggregate) + trend (welfare denied)", ok,
+          f"health={r1.status_code} trend={r2.status_code} welfare-trend={r3.status_code}")
 
 
 def security_attempts() -> None:
@@ -213,7 +216,9 @@ def security_attempts() -> None:
     check("S1 missing headers rejected", r.status_code == 401, f"status={r.status_code}")
 
     r = get("/api/dashboard/overview", "SUPERADMIN", WS)
-    check("S2 forged role rejected", r.status_code == 403, f"status={r.status_code}")
+    # An unknown role is an authentication failure (401), not an authorization
+    # failure (403): the principal cannot even be constructed.
+    check("S2 forged role rejected", r.status_code == 401, f"status={r.status_code}")
 
     r = get("/api/dashboard/audit", WO, AUDIT)
     check("S3 role/purpose mismatch on audit rejected", r.status_code == 403,
