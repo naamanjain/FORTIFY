@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import asdict
 from typing import Any, Iterable
 
@@ -73,15 +74,29 @@ def _context_signals(row: pd.Series, config: InterventionPolicyConfig) -> list[s
     return list(dict.fromkeys(signals))
 
 
-def _choose_action(row: pd.Series, config: InterventionPolicyConfig) -> tuple[str, str, bool]:
+def _choose_action(row: pd.Series, config: InterventionPolicyConfig) -> tuple[str, str, bool, str, str]:
+    """Return (action, priority, requires_human_review, rule_id, rule_text).
+
+    ``rule_id`` names the exact branch of the policy that produced the
+    recommendation, so every recommendation can be traced to a stated rule
+    rather than to an unexplained judgement.
+    """
     band = str(row["risk_band"])
     signals = _context_signals(row, config)
 
     if band == "LOW":
-        return config.low_action, config.low_priority, config.low_requires_human_review
+        rule_text = (
+            f"Band is LOW, so the policy assigns {config.low_action} with {config.low_priority} "
+            "priority and no mandatory human review."
+        )
+        return config.low_action, config.low_priority, config.low_requires_human_review, "BAND_LOW", rule_text
 
     if band == "HIGH":
-        return config.high_action, config.high_priority, config.high_requires_human_review
+        rule_text = (
+            f"Band is HIGH, so the policy assigns {config.high_action} with {config.high_priority} "
+            "priority and mandatory human review."
+        )
+        return config.high_action, config.high_priority, config.high_requires_human_review, "BAND_HIGH", rule_text
 
     # MODERATE: use operational context to distinguish a recovery-focused action
     # from a general welfare check-in. Supervisor review is used when multiple
@@ -98,10 +113,30 @@ def _choose_action(row: pd.Series, config: InterventionPolicyConfig) -> tuple[st
     incident_signal = _has_positive(row, "incident_count_30d_personal_deviation")
 
     if recovery_signal:
-        return config.moderate_recovery_action, config.moderate_priority, config.moderate_requires_human_review
+        rule_text = (
+            f"Band is MODERATE and average rest over the last 7 days is below the "
+            f"{config.recovery_hours_reference:.0f}-hour reference, so the policy assigns "
+            f"{config.moderate_recovery_action}."
+        )
+        return (config.moderate_recovery_action, config.moderate_priority,
+                config.moderate_requires_human_review, "BAND_MODERATE_RECOVERY_SIGNAL", rule_text)
     if workload_signal or incident_signal or len(signals) >= 2:
-        return config.moderate_supervisor_action, config.moderate_priority, config.moderate_requires_human_review
-    return config.moderate_checkin_action, config.moderate_priority, config.moderate_requires_human_review
+        trigger = (
+            "multiple operational context signals are present" if len(signals) >= 2
+            else "an operational workload or incident signal is present"
+        )
+        rule_text = (
+            f"Band is MODERATE and {trigger}, so the policy assigns "
+            f"{config.moderate_supervisor_action}."
+        )
+        return (config.moderate_supervisor_action, config.moderate_priority,
+                config.moderate_requires_human_review, "BAND_MODERATE_CONTEXT_SIGNAL", rule_text)
+    rule_text = (
+        f"Band is MODERATE with no recovery, workload or incident signal, so the "
+        f"policy assigns {config.moderate_checkin_action}."
+    )
+    return (config.moderate_checkin_action, config.moderate_priority,
+            config.moderate_requires_human_review, "BAND_MODERATE_DEFAULT", rule_text)
 
 
 def _risk_rank(band: str) -> int:
@@ -159,17 +194,23 @@ def build_intervention_recommendations(
     rows: list[dict[str, Any]] = []
     for record in decisions.itertuples(index=False):
         row = pd.Series(record._asdict())
-        recommended_action, priority, requires_human_review = _choose_action(row, config)
+        recommended_action, priority, requires_human_review, rule_id, rule_text = _choose_action(row, config)
         rationale_signals = _context_signals(row, config)
         band = str(row["risk_band"])
-        rationale_map = {
-            "LOW": "The current welfare-monitoring signal is low; routine monitoring is appropriate.",
-            "MODERATE": "The current welfare-monitoring signal is moderate; a welfare-support action is appropriate based on available operational context.",
-            "HIGH": "The current welfare-monitoring signal is high; priority human welfare review is appropriate.",
-        }
-        rationale = rationale_map[band]
+        rationale = rule_text
         if rationale_signals:
             rationale += " " + "Signals supporting the recommendation: " + "; ".join(rationale_signals[:3]) + "."
+
+        # Provenance chain: the observed signals, the policy rule that acted on
+        # them, and the recommendation that rule selected. Exposed so a reviewer
+        # can audit why an action was suggested without reading the source.
+        provenance = {
+            "signals": rationale_signals[:3],
+            "rule_id": rule_id,
+            "rule_text": rule_text,
+            "recommendation": recommended_action,
+            "policy_version": config.policy_version,
+        }
 
         rows.append({
             "person_id": str(row["person_id"]),
@@ -181,6 +222,8 @@ def build_intervention_recommendations(
             "priority": priority,
             "rationale": rationale,
             "contributing_signals": " | ".join(rationale_signals[:3]) if rationale_signals else None,
+            "policy_rule": rule_id,
+            "provenance": json.dumps(provenance, sort_keys=True),
             "requires_human_review": bool(requires_human_review),
             "safety_note": "Welfare-support recommendation only; human oversight is required and no medical or punitive conclusion is implied.",
             "model_version": str(row["model_version"]),
@@ -201,6 +244,8 @@ def _apply_cooldown(output: pd.DataFrame, config: InterventionPolicyConfig) -> p
     result["_previous_probability"] = result.groupby("person_id", sort=False)["welfare_risk_probability"].shift(1)
     result["_previous_band"] = result.groupby("person_id", sort=False)["risk_band"].shift(1)
     result["_previous_date"] = result.groupby("person_id", sort=False)["date"].shift(1)
+    result["_base_rule"] = result["policy_rule"]
+    result["_base_provenance"] = result["provenance"]
 
     current_date = pd.to_datetime(result["date"], errors="raise")
     previous_date = pd.to_datetime(result["_previous_date"], errors="coerce")
@@ -221,9 +266,26 @@ def _apply_cooldown(output: pd.DataFrame, config: InterventionPolicyConfig) -> p
 
     result.loc[suppress, "recommended_action"] = config.continue_action
     result.loc[suppress, "rationale"] = "Continue existing welfare support; no material change in the monitored signal requires a new action today."
+    # The cooldown IS a rule; provenance must show the continuation rule, not
+    # the original one that no longer fired.
+    cooldown_provenance = {
+        "signals": [],
+        "rule_id": "COOLDOWN_CONTINUATION",
+        "rule_text": (
+            f"Same recommendation on a consecutive day with no material change "
+            f"(band increase or probability increase of at least "
+            f"{config.material_probability_increase}), so the policy continues "
+            f"existing support instead of repeating a new action."
+        ),
+        "recommendation": config.continue_action,
+        "policy_version": config.policy_version,
+    }
+    result.loc[suppress, "policy_rule"] = "COOLDOWN_CONTINUATION"
+    result.loc[suppress, "provenance"] = json.dumps(cooldown_provenance, sort_keys=True)
 
     result = result.drop(columns=[
-        "_base_action", "_previous_action", "_previous_probability", "_previous_band", "_previous_date"
+        "_base_action", "_previous_action", "_previous_probability", "_previous_band",
+        "_previous_date", "_base_rule", "_base_provenance",
     ])
     return result
 
@@ -232,7 +294,8 @@ def validate_intervention_output(output: pd.DataFrame) -> None:
     required = {
         "person_id", "date", "risk_band", "welfare_risk_probability", "threshold_decision",
         "recommended_action", "priority", "rationale", "contributing_signals",
-        "requires_human_review", "safety_note", "model_version", "policy_version",
+        "policy_rule", "provenance", "requires_human_review", "safety_note",
+        "model_version", "policy_version",
     }
     missing = sorted(required.difference(output.columns))
     if missing:

@@ -4,10 +4,11 @@ import { Icon } from './Icon'
 
 type SearchResult = { type: 'PERSONNEL' | 'UNIT'; key: string; title: string; detail: string }
 
-export function GlobalSearch({ value, results, open, onChange, onSelect }: {
+export function GlobalSearch({ value, results, open, error, onChange, onSelect }: {
   value: string
   results: SearchResult[]
   open: boolean
+  error?: string | null
   onChange: (value: string) => void
   onSelect: (result: SearchResult) => void
 }) {
@@ -26,11 +27,15 @@ export function GlobalSearch({ value, results, open, onChange, onSelect }: {
     <input ref={inputRef} value={value} onChange={handleChange} onKeyDown={handleKey} placeholder="Search people, units or cases" aria-label="Search people, units or cases" />
     <kbd>Ctrl K</kbd>
     {open && value.trim() && <div className="search-menu" role="listbox">
-      {results.length ? results.map((result) => <button key={`${result.type}-${result.key}`} type="button" onClick={() => onSelect(result)}>
-        <span className="search-result-kind">{result.type === 'PERSONNEL' ? 'PERSON' : 'UNIT'}</span>
-        <strong>{result.title}</strong>
-        <small>{result.detail}</small>
-      </button>) : <div className="search-empty">No matching people or units.</div>}
+      {error
+        ? <div className="search-empty" role="alert">Search is unavailable: {error}</div>
+        : results.length
+          ? results.map((result) => <button key={`${result.type}-${result.key}`} type="button" onClick={() => onSelect(result)}>
+              <span className="search-result-kind">{result.type === 'PERSONNEL' ? 'PERSON' : 'UNIT'}</span>
+              <strong>{result.title}</strong>
+              <small>{result.detail}</small>
+            </button>)
+          : <div className="search-empty">No matching people or units.</div>}
     </div>}
   </div>
 }

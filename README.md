@@ -55,12 +55,15 @@ adds exactly one capability.
 | Baselines | `person_day_features_baseline.csv` | Personal / cohort / operational reference context with sufficiency guards |
 | Model | `risk_predictions.csv`, `artifacts/phase4/` | Logistic-regression probability of elevated future voluntary stress self-report |
 | Risk decisions | `risk_decisions.csv`, `artifacts/phase5/` | Platt calibration, a locked operating threshold, LOW/MODERATE/HIGH band, contributing operational signals |
-| Interventions | `intervention_recommendations.csv` | Deterministic welfare-support action mapping with rationales |
+| Explanations | `explanations.jsonl` | Structured contributing factors (value, reference, window, admitting rule) for flagged cases on the latest decision day |
+| Interventions | `intervention_recommendations.csv` | Deterministic welfare-support action mapping with rationales and per-case policy provenance (`policy_rule`, `provenance`) |
 | Feasibility | `intervention_feasibility.csv` | Operational constraint flags (duty conflict, workload, unit pressure) |
 | Demo package | `artifacts/phase12/` | A reproducible hero case + timeline for demonstration |
 
 The API then serves read-only, purpose-authorized views over those artifacts, plus a
-human-in-the-loop workflow that records every decision in a SHA-256 hash-chained audit log.
+human-in-the-loop workflow that records every decision in a SHA-256 hash-chained audit log whose
+head is anchored (HMAC-signed and mirrored to a separate anchor file), so both truncation and
+history rewriting are detectable.
 
 **Vocabulary.** Phase 4 emits `risk_level` (`LOW`/`MODERATE`/`ELEVATED`, fixed display bands).
 Phase 5 onward emits the calibrated `risk_band` (`LOW`/`MODERATE`/`HIGH`) at the
@@ -168,9 +171,14 @@ so the browser makes same-origin requests and no CORS configuration is needed.
 Verify the whole thing:
 
 ```bash
-curl http://localhost:8000/health
-# {"status":"ok","service":"FORTIFY"}
+curl http://localhost:8000/health   # liveness: process is up
+curl http://localhost:8000/ready    # readiness: database + artifacts + data quality
+# {"ready":true,"version":"0.2.0","checks":{"database":"ok","artifacts":"ok","data_quality":"ok"},...}
+curl http://localhost:8000/version  # deployment identification
+curl http://localhost:8000/metrics  # Prometheus-format request counters
 ```
+
+A `/ready` 503 names the exact missing dependency and the command that fixes it.
 
 ---
 
@@ -186,8 +194,12 @@ All variables are optional — the defaults work for local development. Copy
 | `FORTIFY_DATA_DIR` | `<repo>/data/generated` | Where generated CSVs are read from. |
 | `FORTIFY_RUNTIME_DIR` | `<repo>/data/runtime` | Runtime state directory (DB, audit log). |
 | `FORTIFY_AUDIT_LOG` | `<repo>/data/runtime/audit.jsonl` | Hash-chained audit log path. |
+| `FORTIFY_AUDIT_HMAC_KEY` | *(generated per deployment)* | Key that signs the audit anchor. Set a stable ≥32-byte value in any multi-process deployment, sourced from a secret manager. |
+| `FORTIFY_RATE_LIMIT` | *(disabled)* | Application-level requests/minute per client on `/api/`. Example: `120`. The nginx edge limiter applies in containers regardless. |
+| `FORTIFY_LOG_LEVEL` | `INFO` | Structured JSON log level. Logs are redacted for personnel identifiers and free-text comments. |
+| `FORTIFY_APP_VERSION` | `0.2.0` | Reported by `/health`, `/ready`, and `/version`. |
 | `VITE_FORTIFY_ROLE` | `WELFARE_OFFICER` | Frontend: role sent as `X-Fortify-Role`. |
-| `VITE_FORTIFY_PURPOSE` | `WELFARE_SUPPORT` | Frontend: purpose sent as `X-Fortify-Purpose`. |
+| `VITE_FORTIFY_PURPOSE` | `WELFARE_SUPPORT` | Frontend: default purpose. Each request declares the purpose matching its view. |
 | `VITE_API_BASE_URL` | *(empty)* | Frontend: API origin. Empty = same-origin via proxy. |
 
 > **These headers are not authentication.** The backend trusts whatever role/purpose the caller
@@ -369,13 +381,22 @@ These are real and deliberate; none are hidden.
 - **Synthetic data only.** No real government, personnel, or departmental data is used anywhere.
 - **No real-world model validation.** Reported metrics (test ROC AUC ≈ 0.76) are prototype
   measurements on synthetic data. They are not clinical, operational, or externally validated.
+  On this synthetic data the trained model performs no better than a two-variable operational
+  rule at a comparable flag volume; the model's only demonstrated advantage is ranking quality
+  (ROC AUC), not decision quality at the deployed operating point. See
+  `artifacts/model_validity/model_validity_report.json` for the full comparison.
 - **Sparse, voluntary target.** The supervised label depends on people voluntarily submitting a
   wellness self-report; most person-days are unlabeled. Missing wellness is *never* treated as
   evidence of strain.
-- **Explanations are associative, not causal.** They describe operational factors that accompany a
-  higher predicted signal — nothing more.
-- **No authentication.** The API trusts caller-supplied headers. Deploy only on a trusted network.
-- **SQLite and generated files.** Prototype persistence only; no production datastore.
+- **Explanations are associative, not causal.** Each factor states the value, its reference, the
+  window, and the rule that admitted it — and only adverse changes are shown. They describe
+  operational factors that accompany a higher predicted signal, nothing more.
+- **No authentication.** The API trusts caller-supplied headers. The authentication boundary is
+  isolated in `app/security/principal.py` behind a single `Authenticator` interface so a real
+  OIDC integration replaces one class without touching authorization — but it is not implemented.
+  Deploy only on a trusted network.
+- **SQLite and generated files.** Prototype persistence only; the PostgreSQL migration path is
+  documented, not implemented ([docs/POSTGRES_MIGRATION.md](docs/POSTGRES_MIGRATION.md)).
 - **No hardware-backed security.** No TEE, remote attestation, HSM, or secret-management service.
 - **No intervention simulator.** Phase 6/7 provide deterministic action mapping and operational
   feasibility — not numeric projected-strain estimates.
@@ -383,11 +404,12 @@ These are real and deliberate; none are hidden.
 
 ## What production would require
 
-Not implemented here, and deliberately not claimed: a real identity provider with federation; a
-managed secret store or HSM; confidential computing with remote attestation; PostgreSQL or an
-equivalent managed database; per-field encryption at rest with key rotation; centralized tamper-evident
-logging; field-level authorization tied to identity; rate limiting and abuse controls; and a
-formal clinical/occupational-safety review of any welfare inference.
+Not implemented here, and deliberately not claimed: a real identity provider with federation (the
+`Authenticator` interface in `app/security/principal.py` is the seam); a managed secret store or
+HSM; confidential computing with remote attestation; PostgreSQL or an equivalent managed database;
+per-field encryption at rest with key rotation; centrally anchored tamper-evident logging; field-level
+authorization tied to identity; a distributed rate limiter / gateway; and a formal
+clinical/occupational-safety review of any welfare inference.
 
 ---
 

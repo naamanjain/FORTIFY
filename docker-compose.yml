@@ -47,15 +47,29 @@ services:
       - fortify-artifacts:/app/artifacts
     ports:
       - "8000:8000"
+    healthcheck:
+      # Mirrors the image HEALTHCHECK; explicit here for compose.
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     restart: unless-stopped
 
   fortify-frontend:
     build:
       context: ./frontend
     depends_on:
-      - fortify-backend
+      fortify-backend:
+        condition: service_healthy
     ports:
       - "5173:80"
+    healthcheck:
+      test: ["CMD", "wget", "-qO", "/dev/null", "http://127.0.0.1/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     restart: unless-stopped
 
 volumes:

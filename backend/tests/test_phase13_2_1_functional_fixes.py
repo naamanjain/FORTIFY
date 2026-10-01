@@ -50,4 +50,8 @@ def test_auth_errors_are_not_exposed_as_raw_json_through_frontend_api_policy() -
     with TestClient(app) as client:
         response = client.get("/api/dashboard/audit", headers=WELFARE)
     assert response.status_code == 403
-    assert response.json()["detail"] == "Audit view requires auditor authorization."
+    # The refusal must state which purpose is required, without disclosing
+    # anything about the underlying resource or leaking internals.
+    detail = response.json()["detail"]
+    assert "AUDIT" in detail
+    assert "Traceback" not in detail and "Error" not in detail

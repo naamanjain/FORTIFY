@@ -34,4 +34,7 @@ EXPOSE 8000
 # Configuration via FORTIFY_* environment variables — see backend/.env.example.
 # The default SQLite URL points inside the read-only image, so deployments
 # must set FORTIFY_DATABASE_URL to a path on a mounted volume.
+# Liveness for orchestrators: depends on nothing but the process itself.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3     CMD ["python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4).status==200 else 1)"]
+
 CMD ["uvicorn", "app.main:app", "--app-dir", "/app/backend", "--host", "0.0.0.0", "--port", "8000"]

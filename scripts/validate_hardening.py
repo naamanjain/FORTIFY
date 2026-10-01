@@ -18,7 +18,7 @@ from fastapi.testclient import TestClient
 from app.core.config import settings
 from app.core.database import resolve_sqlite_url
 from app.core.paths import AUDIT_PATH
-from app.main import app
+from app.main import APP_VERSION, app
 from app.security.audit import AuditLog
 from app.services.workflow import initialize_workflow_store
 
@@ -102,7 +102,8 @@ def main() -> int:
 
     with TestClient(app) as client:
         health = client.get("/health")
-    if health.status_code != 200 or health.json() != {"status": "ok", "service": "FORTIFY"}:
+    expected_health = {"status": "ok", "service": "FORTIFY", "version": APP_VERSION}
+    if health.status_code != 200 or health.json() != expected_health:
         raise SystemExit("VALIDATION FAILED: health endpoint")
 
     report = {

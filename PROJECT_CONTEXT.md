@@ -9,6 +9,39 @@
 - Category: Software
 - Domain: MedTech / BioTech / HealthTech
 
+## Engineering hardening pass (2026-10-01)
+
+A second engineering pass verified and strengthened the completed prototype without changing its
+vocabulary or purpose:
+
+- **Model validity probes** (`scripts/validate_model_validity.py`): features are recomputed from
+  source data truncated at a mid-history cutoff and compared byte-for-byte — no feature depends on
+  its own future. No feature is a near-perfect proxy for the label. Train/validation/test occupy
+  disjoint date ranges. The report also states plainly that on this synthetic data the trained
+  model performs no better than a two-variable operational rule at a comparable flag volume.
+- **Time-aware operating point**: the Phase 5 threshold is selected on the most recent half of the
+  validation window (locked at 0.40; the full-window policy selects 0.45), which transfers better
+  to the held-out month. Both thresholds are recorded in the model card.
+- **Purpose limitation fixed**: the overview endpoint previously exposed per-person risk data to
+  audit/administrator purposes; per-person cases now live behind `/api/dashboard/attention`
+  (welfare purpose only), and the frontend declares the purpose matching each view.
+- **Audit anchoring**: the hash chain is anchored with an HMAC-signed head; truncation and full
+  history rewrites are detected (previously both verified as valid).
+- **Explanation integrity**: contributing factors are structured objects carrying value, reference,
+  window, and admitting rule; only adverse changes are shown. Recommendation provenance
+  (`policy_rule`, `provenance`) records signal → rule → recommendation for every case.
+- **Data quality gate**: `app/ml/data_quality.py` checks duplicates, broken references, impossible
+  values, invalid dates, distribution anomalies and staleness; `/ready` fails when data quality
+  errors exist.
+- **Security**: single authorization choke point (`app/api/dependencies.py`), optimistic
+  concurrency on workflow transitions, idempotent feedback, anchored audit, rate limiting,
+  JSON logging with redaction, consistent error envelope, fail-closed startup.
+- **Frontend truth**: no fabricated states — unknown trend says "unknown", truncated lists state
+  their truncation, action failures no longer tear down the page, and the access badge is
+  labelled "not authenticated".
+
+## Problem
+
 ## Problem
 Uniformed personnel operate under prolonged deployments, irregular/night duties, operational workload, inadequate recovery, family separation, transfers, training commitments, and demanding operational incidents. Existing welfare intervention may be reactive and depend heavily on manual observation or voluntary self-reporting.
 

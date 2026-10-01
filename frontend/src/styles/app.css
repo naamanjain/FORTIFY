@@ -24,3 +24,14 @@
 .personnel-click-row{cursor:pointer}.personnel-click-row:hover{background:#f8fafc}.personnel-click-row:focus{outline:2px solid #9aa6b9;outline-offset:-2px}.review-queue-summary{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:14px}.review-section{min-height:88px;padding:12px 14px;text-align:left;border:1px solid var(--border);background:#fff;color:var(--text);display:flex;flex-direction:column;gap:4px}.review-section:hover{background:var(--surface-low)}.review-section.active{border-color:var(--navy);box-shadow:inset 3px 0 0 var(--navy)}.review-section span{display:flex;align-items:center;gap:7px;font-size:11px;color:#505760}.review-section strong{font-size:24px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}.review-section small{font-size:10px;color:#7a8088}@media(max-width:700px){.review-queue-summary{grid-template-columns:1fr}}
 
 .attention-click-row{cursor:pointer}.attention-click-row:hover{background:#f8fafc}.attention-click-row:focus{outline:2px solid #9aa6b9;outline-offset:-2px}
+
+/* --- Hardening pass additions --- */
+.action-error{display:flex;align-items:center;gap:10px;border:1px solid #e5c788;background:var(--moderate-bg);color:#5e4200;padding:10px 14px;border-radius:4px;font-size:12px;margin-bottom:12px}
+.factor-list{list-style:none;margin:0;padding:0;display:grid;gap:10px}
+.factor-list li{border:1px solid var(--border-soft);border-left:3px solid #8995a9;padding:10px 12px;background:#fbfcfd;display:grid;gap:4px}
+.factor-list li strong{font-size:12px;color:#2c3137}
+.factor-list li span{font-size:12px;color:#545a62}
+.factor-list li small{font-size:11px;color:#71767d}
+.access-auth-note{display:block;margin-top:6px;font-size:10px;color:#8a9098}
+.panel-note{display:block;font-size:11px;color:#71767d;margin-bottom:8px}
+.search-empty[role="alert"]{color:#8f1313}
