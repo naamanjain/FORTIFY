@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fortify-config
+  namespace: fortify
+  labels:
+    app.kubernetes.io/part-of: fortify
+data:
+  # Absolute path on the mounted PVC (see backend/.env.example for semantics).
+  FORTIFY_DATABASE_URL: sqlite:////app/data/runtime/fortify.db
+  # Same-origin through the frontend proxy; direct browser access in dev only.
+  FORTIFY_CORS_ORIGINS: http://localhost:5173

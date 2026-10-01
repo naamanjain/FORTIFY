@@ -1,0 +1,87 @@
+# FORTIFY CI — frontend build + full backend verification from a clean checkout.
+#
+# The repository ships no generated data or models (they are 300+ MB of
+# regenerable output), so CI proves the complete chain from a fresh clone:
+# pinned install -> seed-42 regeneration -> pytest (integration tests read the
+# regenerated artifacts) -> phase validators.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  frontend-build:
+    name: Frontend typecheck + build (Node 24)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build (includes TypeScript check)
+        working-directory: frontend
+        run: npm run build
+
+  backend-verify:
+    name: Backend tests + validators (Python 3.13, seed 42)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install pinned dependencies
+        run: pip install -r backend/requirements.txt
+
+      - name: Regenerate the deterministic demo environment
+        # Dashboard/workflow integration tests read these artifacts, so the
+        # data must exist before pytest runs (same as a fresh local clone).
+        run: python scripts/build_all.py
+
+      - name: Run backend test suite
+        run: pytest -q
+
+      - name: Phase validators
+        run: |
+          python scripts/validate_synthetic_data.py --output data/generated --personnel 500 --days 180
+          python scripts/validate_features.py --input data/generated/person_day_features.csv --personnel 500 --days 180
+          python scripts/validate_baselines.py --input data/generated/person_day_features_baseline.csv
+          python scripts/validate_model.py
+          python scripts/validate_phase5_risk_layer.py
+          python scripts/validate_interventions.py --input data/generated/intervention_recommendations.csv --report data/generated/intervention_generation_report.json
+          python scripts/validate_feasibility.py --expected-rows 90000
+          python scripts/validate_security.py
+          python scripts/validate_workflow.py
+          python scripts/validate_dashboard.py
+          python scripts/validate_demo.py
+          python scripts/validate_hardening.py
+          python scripts/validate_product_experience.py
+          python scripts/validate_stitch_product.py
+
+      - name: Upload regenerated artifacts for inspection
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: regenerated-artifacts
+          path: |
+            data/generated/*_report.json
+            artifacts/
+          retention-days: 7
+          if-no-files-found: error

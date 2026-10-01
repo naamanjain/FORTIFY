@@ -10,7 +10,7 @@ import type { Trend } from '../components/TrendIndicator'
 
 const nav=[
  {id:'attention',label:'Attention',path:'/attention',icon:'alert' as const},
- {id:'personnel',label:'Personnel',path:'/personnel',icon:'person' as const},
+ {id:'personnel',label:'Personnel',path:'/personnel',icon:'person' as const},{id:'followups',label:'Follow-ups',path:'/follow-ups',icon:'calendar' as const},
  {id:'units',label:'Units',path:'/units',icon:'units' as const},
  {id:'trends',label:'Trends',path:'/trends',icon:'trend' as const},
  {id:'data',label:'Data & Signals',path:'/data/signals',icon:'data' as const},
@@ -18,15 +18,15 @@ const nav=[
  {id:'governance',label:'Governance',path:'/governance',icon:'audit' as const},
 ]
 function push(p:string){history.pushState({},'',p);dispatchEvent(new PopStateEvent('popstate'))}
-function statusLabel(s:WorkflowItem['workflow_state']){return ({NEW:'New',ACKNOWLEDGED:'Acknowledged',IN_REVIEW:'Being reviewed',SUPPORT_PLANNED:'Support planned',DEFERRED:'Deferred',COMPLETED:'Completed',DISMISSED:'Dismissed'})[s]}
+function statusLabel(s:WorkflowItem['workflow_state']){const labels:Record<WorkflowItem['workflow_state'],string>={NEW:'New',ACKNOWLEDGED:'Acknowledged',IN_REVIEW:'Being reviewed',SUPPORT_PLANNED:'Support planned',SUPPORT_COMPLETED:'Support completed',FOLLOW_UP_SCHEDULED:'Follow-up scheduled',FOLLOW_UP_DUE:'Follow-up due',FOLLOW_UP_COMPLETED:'Follow-up completed',CLOSED:'Closed',COMPLETED:'Completed',DEFERRED:'Deferred',DISMISSED:'Dismissed'};return labels[s]}
 export default function Reviews(){
  const [items,setItems]=useState<WorkflowItem[]>([]),[overview,setOverview]=useState<DashboardOverview|null>(null),[loading,setLoading]=useState(true),[error,setError]=useState<string|null>(null),[notificationsOpen,setNotificationsOpen]=useState(false),[section,setSection]=useState<'high'|'moderate'|'all'>('high')
  useEffect(()=>{void Promise.all([getDashboardOverview(),getPendingWorkflow(200)]).then(([o,w])=>{setOverview(o);setItems(w.items)}).catch(e=>setError(e instanceof Error?e.message:'Review queue could not be loaded.')).finally(()=>setLoading(false))},[])
  const latest=overview?.as_of_date ?? ''
  const active=useMemo(()=>items.filter(x=>x.date===latest && !['COMPLETED','DISMISSED'].includes(x.workflow_state)),[items,latest])
- const high=useMemo(()=>active.filter(x=>x.risk_band==='HIGH').map(x=>({...x,unit_id:x.unit_id??'—',trend:'RISING' as Trend})),[active])
- const moderate=useMemo(()=>active.filter(x=>x.risk_band==='MODERATE').map(x=>({...x,unit_id:x.unit_id??'—',trend:'STABLE' as Trend})),[active])
- const low=useMemo(()=>active.filter(x=>x.risk_band==='LOW').map(x=>({...x,unit_id:x.unit_id??'—',trend:'STABLE' as Trend})),[active])
+ const high=useMemo(()=>active.filter(x=>x.risk_band==='HIGH').map(x=>({...x,unit_id:x.unit_id??'—',trend:(x.trend??'STABLE') as Trend})),[active])
+ const moderate=useMemo(()=>active.filter(x=>x.risk_band==='MODERATE').map(x=>({...x,unit_id:x.unit_id??'—',trend:(x.trend??'STABLE') as Trend})),[active])
+ const low=useMemo(()=>active.filter(x=>x.risk_band==='LOW').map(x=>({...x,unit_id:x.unit_id??'—',trend:(x.trend??'STABLE') as Trend})),[active])
  const rows=section==='high'?high:section==='moderate'?moderate:[...high,...moderate,...low]
  const open=(id:string)=>push(`/person/${encodeURIComponent(id)}`)
  if(loading)return <AppShell navItems={nav} activePath="/reviews" query="" searchResults={[]} searchOpen={false} onQueryChange={()=>{}} onSearchSelect={()=>{}} onNavigate={push} notificationsOpen={notificationsOpen} onToggleNotifications={()=>setNotificationsOpen(v=>!v)}><LoadingSkeleton/></AppShell>

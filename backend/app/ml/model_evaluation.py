@@ -9,6 +9,7 @@ from sklearn.metrics import (
     average_precision_score,
     brier_score_loss,
     confusion_matrix,
+    f1_score,
     precision_score,
     recall_score,
     roc_auc_score,
@@ -39,3 +40,16 @@ def evaluate_binary_predictions(y_true, probabilities, threshold: float = 0.5) -
         result["roc_auc"] = None
         result["average_precision"] = None
     return result
+
+
+def evaluate_hard_predictions(y_true, y_pred) -> dict[str, Any]:
+    """Metrics for predictors that emit hard labels only (baselines)."""
+    y = np.asarray(y_true, dtype=int)
+    pred = np.asarray(y_pred, dtype=int)
+    return {
+        "samples": int(len(y)),
+        "accuracy": float(accuracy_score(y, pred)),
+        "precision": float(precision_score(y, pred, zero_division=0)),
+        "recall": float(recall_score(y, pred, zero_division=0)),
+        "f1": float(f1_score(y, pred, zero_division=0)),
+    }

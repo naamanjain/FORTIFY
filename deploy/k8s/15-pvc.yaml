@@ -1,0 +1,15 @@
+# One ReadWriteOnce volume shared by the pipeline job and the backend pod.
+# The generated datasets are ~300 MB uncompressed; 2 Gi leaves headroom.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: fortify-store
+  namespace: fortify
+  labels:
+    app.kubernetes.io/part-of: fortify
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 2Gi

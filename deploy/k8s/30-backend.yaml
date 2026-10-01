@@ -1,0 +1,80 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fortify-backend
+  namespace: fortify
+  labels:
+    app.kubernetes.io/name: fortify-backend
+    app.kubernetes.io/part-of: fortify
+spec:
+  replicas: 1 # SQLite + in-process caches: single writer by design
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: fortify-backend
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: fortify-backend
+        app.kubernetes.io/part-of: fortify
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+      containers:
+        - name: api
+          image: fortify-backend:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: fortify-config
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 30
+          volumeMounts:
+            - name: store
+              mountPath: /app/data/generated
+              subPath: data/generated
+            - name: store
+              mountPath: /app/data/runtime
+              subPath: data/runtime
+            - name: store
+              mountPath: /app/artifacts
+              subPath: artifacts
+          resources:
+            requests:
+              cpu: 100m
+              memory: 512Mi
+            limits:
+              memory: 1Gi
+      volumes:
+        - name: store
+          persistentVolumeClaim:
+            claimName: fortify-store
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fortify-backend # the frontend nginx proxy targets this DNS name
+  namespace: fortify
+  labels:
+    app.kubernetes.io/name: fortify-backend
+    app.kubernetes.io/part-of: fortify
+spec:
+  selector:
+    app.kubernetes.io/name: fortify-backend
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http

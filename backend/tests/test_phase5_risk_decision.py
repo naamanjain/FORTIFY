@@ -32,10 +32,26 @@ def test_threshold_metrics_are_complete() -> None:
     assert result["predicted_positive_count"] == 2
 
 
-def test_threshold_selection_uses_validation_recall_floor() -> None:
+def test_threshold_selection_uses_validation_precision_floor() -> None:
     table = analyze_thresholds([0, 0, 1, 1, 1], [0.05, 0.20, 0.35, 0.60, 0.90], [0.20, 0.40, 0.60])
-    selection = select_operating_threshold(table, minimum_validation_recall=0.60)
+    selection = select_operating_threshold(table, minimum_validation_precision=0.55)
     assert selection.selected_threshold == 0.20
+
+
+def test_threshold_selection_excludes_below_floor_precision() -> None:
+    table = analyze_thresholds([0, 0, 1, 1, 1], [0.05, 0.20, 0.35, 0.60, 0.90], [0.20, 0.40, 0.60])
+    selection = select_operating_threshold(table, minimum_validation_precision=0.9)
+    assert selection.selected_threshold == 0.40
+
+
+def test_threshold_selection_fails_when_no_candidate_meets_precision_floor() -> None:
+    import pytest
+
+    # Every candidate threshold has at least one false positive here, so no
+    # candidate reaches precision 1.0 and selection must fail loudly.
+    table = analyze_thresholds([1, 0, 1, 0, 1], [0.9, 0.8, 0.7, 0.6, 0.5], [0.4, 0.6, 0.8])
+    with pytest.raises(ValueError):
+        select_operating_threshold(table, minimum_validation_precision=1.0)
 
 
 def test_risk_bands_and_decision_signal_are_deterministic() -> None:

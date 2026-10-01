@@ -5,6 +5,7 @@ import PersonProfile from './pages/PersonProfile'
 import UnitCommand from './pages/UnitCommand'
 import DataSignals from './pages/DataSignals'
 import DataCollection from './pages/DataCollection'
+import FollowUps from './pages/FollowUps'
 import Governance from './pages/Governance'
 import Reviews from './pages/Reviews'
 import Personnel from './pages/Personnel'
@@ -20,6 +21,7 @@ function RouteView({ path }: { path: string }) {
   if (path === '/trends') return <Trends />
   if (path === '/data/signals') return <DataSignals />
   if (path === '/data/collection') return <DataCollection />
+  if (path === '/follow-ups') return <FollowUps />
   if (path === '/reviews') return <Reviews />
   if (path === '/governance') return <Governance />
   return <NotFound />

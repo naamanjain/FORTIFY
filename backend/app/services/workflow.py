@@ -3,15 +3,18 @@ from __future__ import annotations
 import hashlib
 import os
 import sqlite3
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import RLock
-from typing import Any
+from typing import Any, Iterator
 
 import pandas as pd
 
 from app.core.config import settings
+from app.core.database import resolve_sqlite_url
+from app.core.paths import AUDIT_PATH, DATA_DIR
 from app.security.audit import AuditEvent, AuditLog
 from app.security.rbac import authorize
 from app.security.security_config import AccessPurpose, SecurityRole
@@ -42,6 +45,10 @@ TRANSITIONS = {
     "DISMISSED": set(),
 }
 
+class DataUnavailable(RuntimeError):
+    """Raised when generated data artifacts required by the workflow are missing."""
+
+
 @dataclass(frozen=True)
 class WorkflowPolicyConfig:
     workflow_policy_version: str = "phase10-v1"
@@ -49,14 +56,22 @@ class WorkflowPolicyConfig:
     review_purpose: str = AccessPurpose.WELFARE_SUPPORT.value
 
 _DECISION_CACHE: tuple[tuple[int, int, int], pd.DataFrame] | None = None
+_TREND_CACHE: tuple[tuple[int, int, int], dict[tuple[str, str], str]] | None = None
 _DECISION_CACHE_LOCK = RLock()
+# Guard is keyed on both the database file and the source-data signature so a
+# new/empty database always re-materializes its workflow items.
+_MATERIALIZED_GUARD: tuple[str, tuple[int, int, int]] | None = None
 
 
-def _connect() -> sqlite3.Connection:
+@contextmanager
+def _connection() -> Iterator[sqlite3.Connection]:
     conn = sqlite3.connect(_db_path(), timeout=10.0)
-    conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA busy_timeout = 10000")
-    return conn
+    try:
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA busy_timeout = 10000")
+        yield conn
+    finally:
+        conn.close()
 
 
 def _data_signature(data_dir: Path) -> tuple[int, int, int]:
@@ -65,21 +80,20 @@ def _data_signature(data_dir: Path) -> tuple[int, int, int]:
     for name in names:
         path = data_dir / name
         if not path.exists():
-            raise FileNotFoundError(path)
+            raise DataUnavailable(
+                f"Required generated data is unavailable: {name}. "
+                "Generate the demo dataset first (python scripts/build_all.py)."
+            )
         mtimes.append(path.stat().st_mtime_ns)
     return (mtimes[0], mtimes[1], int(data_dir.stat().st_mtime_ns))
 
 
 def _db_path() -> Path:
-    prefix = "sqlite:///"
-    if not settings.database_url.startswith(prefix):
-        raise ValueError("Phase 10 workflow store requires SQLite.")
-    return Path(settings.database_url.removeprefix(prefix))
+    return resolve_sqlite_url(settings.database_url)
 
 
 def _audit_path() -> Path:
-    root = Path(__file__).resolve().parents[3]
-    return Path(os.getenv("FORTIFY_AUDIT_LOG", root / "artifacts" / "phase8" / "dashboard_audit.jsonl"))
+    return AUDIT_PATH
 
 
 def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
@@ -90,7 +104,7 @@ def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition
 
 def initialize_workflow_store() -> None:
     path = _db_path(); path.parent.mkdir(parents=True, exist_ok=True)
-    with _connect() as conn:
+    with _connection() as conn:
         conn.execute("""CREATE TABLE IF NOT EXISTS workflow_items (
             workflow_item_id TEXT PRIMARY KEY, person_id TEXT NOT NULL, recommendation_date TEXT NOT NULL,
             risk_band TEXT NOT NULL, recommended_action TEXT NOT NULL, priority TEXT NOT NULL,
@@ -122,12 +136,13 @@ def initialize_workflow_store() -> None:
             completed_at TEXT, completed_by_role TEXT,
             FOREIGN KEY (workflow_item_id) REFERENCES workflow_items(workflow_item_id),
             FOREIGN KEY (support_event_id) REFERENCES workflow_support_events(support_event_id))""")
-        # Safe migrations for databases created by Phase 10 before the expanded lifecycle.
+        # Safe migrations for databases created before these columns existed.
         _ensure_column(conn, "workflow_items", "support_completed_at", "TEXT")
         _ensure_column(conn, "workflow_items", "support_completed_by_role", "TEXT")
         _ensure_column(conn, "workflow_items", "active_support_event_id", "TEXT")
         _ensure_column(conn, "workflow_items", "active_followup_id", "TEXT")
         _ensure_column(conn, "workflow_items", "feedback_submitted", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "workflow_items", "unit_id", "TEXT")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_workflow_items_pending ON workflow_items(workflow_state, recommendation_date, priority, workflow_item_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_workflow_audit_item ON workflow_audit_events(workflow_item_id, timestamp, event_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_workflow_followups_status ON workflow_followups(status, scheduled_for, followup_id)")
@@ -142,8 +157,7 @@ def _workflow_id(person_id: str, date: str) -> str:
 
 def _load_decisions() -> pd.DataFrame:
     global _DECISION_CACHE
-    root = Path(__file__).resolve().parents[3]
-    data_dir = Path(os.getenv("FORTIFY_DATA_DIR", root / "data" / "generated"))
+    data_dir = DATA_DIR
     with _DECISION_CACHE_LOCK:
         signature = _data_signature(data_dir)
         if _DECISION_CACHE is not None and _DECISION_CACHE[0] == signature:
@@ -162,9 +176,25 @@ def _load_decisions() -> pd.DataFrame:
         return merged
 
 
+def _personnel_unit_map() -> dict[str, str]:
+    path = DATA_DIR / "personnel.csv"
+    if not path.exists():
+        raise DataUnavailable(
+            "Required generated data is unavailable: personnel.csv. "
+            "Generate the demo dataset first (python scripts/build_all.py)."
+        )
+    frame = pd.read_csv(path, usecols=["person_id", "unit_id"])
+    return {str(r.person_id): str(r.unit_id) for r in frame.itertuples(index=False)}
+
+
 def ensure_workflow_items() -> None:
-    initialize_workflow_store(); data = _load_decisions()
-    with _connect() as conn:
+    global _MATERIALIZED_GUARD
+    signature = _data_signature(DATA_DIR)
+    guard = (str(_db_path()), signature)
+    if _MATERIALIZED_GUARD == guard:
+        return
+    initialize_workflow_store(); data = _load_decisions(); units = _personnel_unit_map()
+    with _connection() as conn:
         existing = {row[0] for row in conn.execute("SELECT workflow_item_id FROM workflow_items")}
         rows = []
         for r in data.itertuples(index=False):
@@ -175,20 +205,34 @@ def ensure_workflow_items() -> None:
             rows.append((item_id, str(r.person_id), str(r.date), str(r.risk_band), action, str(r.priority),
                          str(r.feasibility_status), str(r.constraint_flags or ""), str(r.rationale),
                          int(bool(r.requires_human_review_feas)), str(r.model_version), str(r.policy_version),
-                         str(r.feasibility_policy_version), "NEW", None, None, None, None, None, None, None, 0))
+                         str(r.feasibility_policy_version), "NEW", None, None, None, None, None, None, None, 0,
+                         units.get(str(r.person_id))))
         conn.executemany("""INSERT OR IGNORE INTO workflow_items
             (workflow_item_id, person_id, recommendation_date, risk_band, recommended_action, priority,
              feasibility_status, constraint_flags, rationale, requires_human_review, model_version, policy_version,
              feasibility_policy_version, workflow_state, last_transition_at, last_actor_role, last_reason_code,
-             support_completed_at, support_completed_by_role, active_support_event_id, active_followup_id, feedback_submitted)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", rows)
+             support_completed_at, support_completed_by_role, active_support_event_id, active_followup_id,
+             feedback_submitted, unit_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", rows)
+        # Backfill unit identifiers for rows created before the column existed.
+        null_units = conn.execute("SELECT COUNT(*) FROM workflow_items WHERE unit_id IS NULL").fetchone()[0]
+        if null_units:
+            conn.execute("CREATE TEMP TABLE _personnel_units (person_id TEXT PRIMARY KEY, unit_id TEXT)")
+            conn.executemany("INSERT OR REPLACE INTO _personnel_units VALUES (?, ?)",
+                             [(pid, uid) for pid, uid in units.items()])
+            conn.execute("""UPDATE workflow_items SET unit_id =
+                (SELECT u.unit_id FROM _personnel_units u WHERE u.person_id = workflow_items.person_id)
+                WHERE unit_id IS NULL""")
+            conn.execute("DROP TABLE _personnel_units")
         conn.commit()
+    _MATERIALIZED_GUARD = guard
 
 
 def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     return {
         "workflow_item_id": row["workflow_item_id"], "person_id": row["person_id"], "date": row["recommendation_date"],
-        "risk_band": row["risk_band"], "recommended_action": row["recommended_action"], "priority": row["priority"],
+        "unit_id": row["unit_id"], "risk_band": row["risk_band"], "recommended_action": row["recommended_action"],
+        "priority": row["priority"],
         "feasibility_status": row["feasibility_status"], "constraint_flags": row["constraint_flags"],
         "rationale": row["rationale"], "requires_human_review": bool(row["requires_human_review"]),
         "model_version": row["model_version"], "policy_version": row["policy_version"],
@@ -201,26 +245,32 @@ def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
 
 
 def _trend_lookup() -> dict[tuple[str, str], str]:
-    decisions = _load_decisions()[["person_id", "date", "welfare_risk_probability", "risk_band"]].copy()
-    decisions["date"] = decisions["date"].astype(str)
-    decisions = decisions.sort_values(["person_id", "date"])
-    lookup: dict[tuple[str, str], str] = {}
-    for pid, group in decisions.groupby("person_id", sort=False):
-        previous_prob = None; previous_band = None
-        for rec in group.itertuples(index=False):
-            if previous_prob is None:
-                value = "RISING" if str(rec.risk_band) == "HIGH" else "STABLE"
-            else:
-                delta = float(rec.welfare_risk_probability) - previous_prob
-                value = "RISING" if delta > 0.015 or (str(rec.risk_band) == "HIGH" and previous_band != "HIGH") else "IMPROVING" if delta < -0.015 else "STABLE"
-            lookup[(str(pid), str(rec.date))] = value
-            previous_prob = float(rec.welfare_risk_probability); previous_band = str(rec.risk_band)
-    return lookup
+    global _TREND_CACHE
+    signature = _data_signature(DATA_DIR)
+    with _DECISION_CACHE_LOCK:
+        if _TREND_CACHE is not None and _TREND_CACHE[0] == signature:
+            return _TREND_CACHE[1]
+        decisions = _load_decisions()[["person_id", "date", "welfare_risk_probability", "risk_band"]].copy()
+        decisions["date"] = decisions["date"].astype(str)
+        decisions = decisions.sort_values(["person_id", "date"])
+        lookup: dict[tuple[str, str], str] = {}
+        for pid, group in decisions.groupby("person_id", sort=False):
+            previous_prob = None; previous_band = None
+            for rec in group.itertuples(index=False):
+                if previous_prob is None:
+                    value = "RISING" if str(rec.risk_band) == "HIGH" else "STABLE"
+                else:
+                    delta = float(rec.welfare_risk_probability) - previous_prob
+                    value = "RISING" if delta > 0.015 or (str(rec.risk_band) == "HIGH" and previous_band != "HIGH") else "IMPROVING" if delta < -0.015 else "STABLE"
+                lookup[(str(pid), str(rec.date))] = value
+                previous_prob = float(rec.welfare_risk_probability); previous_band = str(rec.risk_band)
+        _TREND_CACHE = (signature, lookup)
+        return lookup
 
 
 def list_items(*, pending_only: bool = True, limit: int = 50) -> list[dict[str, Any]]:
     ensure_workflow_items(); limit = max(1, min(limit, 200)); trend_lookup = _trend_lookup()
-    with _connect() as conn:
+    with _connection() as conn:
         conn.row_factory = sqlite3.Row
         states = "'NEW','ACKNOWLEDGED','IN_REVIEW','SUPPORT_PLANNED','DEFERRED'"
         sql = f"SELECT * FROM workflow_items WHERE workflow_state IN ({states})" if pending_only else "SELECT * FROM workflow_items"
@@ -233,7 +283,7 @@ def list_items(*, pending_only: bool = True, limit: int = 50) -> list[dict[str, 
 
 def get_item(workflow_item_id: str) -> dict[str, Any] | None:
     ensure_workflow_items()
-    with _connect() as conn:
+    with _connection() as conn:
         conn.row_factory = sqlite3.Row
         row = conn.execute("SELECT * FROM workflow_items WHERE workflow_item_id = ?", (workflow_item_id,)).fetchone()
         if not row: return None
@@ -246,7 +296,7 @@ def get_item(workflow_item_id: str) -> dict[str, Any] | None:
 
 
 def get_history(workflow_item_id: str) -> list[dict[str, Any]]:
-    with _connect() as conn:
+    with _connection() as conn:
         rows = conn.execute("""SELECT event_id, workflow_item_id, person_id, recommendation_date,
             previous_state, new_state, actor_role, purpose, timestamp, reason_code, model_version,
             policy_version, feasibility_policy_version, workflow_policy_version
@@ -257,7 +307,7 @@ def get_history(workflow_item_id: str) -> list[dict[str, Any]]:
 
 
 def get_support_event(workflow_item_id: str) -> dict[str, Any] | None:
-    with _connect() as conn:
+    with _connection() as conn:
         row = conn.execute("""SELECT support_event_id, workflow_item_id, person_id, support_action, completed_at, actor_role
             FROM workflow_support_events WHERE workflow_item_id=? ORDER BY completed_at DESC, support_event_id DESC LIMIT 1""", (workflow_item_id,)).fetchone()
     if not row: return None
@@ -265,7 +315,7 @@ def get_support_event(workflow_item_id: str) -> dict[str, Any] | None:
 
 
 def get_feedback(workflow_item_id: str) -> dict[str, Any] | None:
-    with _connect() as conn:
+    with _connection() as conn:
         row = conn.execute("""SELECT feedback_id, support_event_id, helpfulness, comment, follow_up_requested, submitted_at, recorded_by_role
             FROM workflow_feedback WHERE workflow_item_id=? ORDER BY submitted_at DESC, feedback_id DESC LIMIT 1""", (workflow_item_id,)).fetchone()
     if not row: return None
@@ -273,7 +323,7 @@ def get_feedback(workflow_item_id: str) -> dict[str, Any] | None:
 
 
 def get_followup(workflow_item_id: str) -> dict[str, Any] | None:
-    with _connect() as conn:
+    with _connection() as conn:
         row = conn.execute("""SELECT followup_id, support_event_id, scheduled_for, status, created_at, created_by_role,
             last_updated_at, completed_at, completed_by_role FROM workflow_followups
             WHERE workflow_item_id=? ORDER BY last_updated_at DESC, followup_id DESC LIMIT 1""", (workflow_item_id,)).fetchone()
@@ -284,11 +334,15 @@ def get_followup(workflow_item_id: str) -> dict[str, Any] | None:
 def _authorize_transition(actor_role: str, purpose: str, config: WorkflowPolicyConfig) -> None:
     decision = authorize(actor_role, purpose)
     if not decision.allowed or actor_role != config.review_role or purpose != config.review_purpose:
+        _write_external_audit("WORKFLOW_ACCESS", actor_role, purpose, "DENIED",
+                              "workflow_transition", {"reason": "Individual workflow transitions require welfare-support authorization."})
         raise PermissionError("Individual workflow transitions require welfare-support authorization.")
 
 
-def _write_external_audit(event_type: str, actor_role: str, purpose: str, resource: str, timestamp: str, details: dict[str, Any]) -> None:
-    AuditLog(_audit_path()).append(AuditEvent(event_type, actor_role, purpose, "ALLOWED", resource, timestamp, details))
+def _write_external_audit(event_type: str, actor_role: str, purpose: str, outcome: str, resource: str,
+                          details: dict[str, Any]) -> None:
+    AuditLog(_audit_path()).append(AuditEvent(
+        event_type, actor_role, purpose, outcome, resource, datetime.now(timezone.utc).isoformat(), details))
 
 
 def transition_item(workflow_item_id: str, *, new_state: str, actor_role: str, purpose: str, reason_code: str,
@@ -297,7 +351,7 @@ def transition_item(workflow_item_id: str, *, new_state: str, actor_role: str, p
     if new_state not in WORKFLOW_STATES: raise ValueError(f"Unknown workflow state: {new_state}")
     if not reason_code.strip(): raise ValueError("reason_code is required for workflow transitions")
     ensure_workflow_items(); now = datetime.now(timezone.utc).isoformat(); support_created = None
-    with _connect() as conn:
+    with _connection() as conn:
         conn.execute("BEGIN IMMEDIATE"); conn.row_factory = sqlite3.Row
         row = conn.execute("SELECT * FROM workflow_items WHERE workflow_item_id=?", (workflow_item_id,)).fetchone()
         if not row: raise KeyError("Workflow item not found")
@@ -317,15 +371,19 @@ def transition_item(workflow_item_id: str, *, new_state: str, actor_role: str, p
           (event_id,workflow_item_id,person_id,recommendation_date,previous_state,new_state,actor_role,purpose,timestamp,reason_code,model_version,policy_version,feasibility_policy_version,workflow_policy_version)
           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (event_id,workflow_item_id,row["person_id"],row["recommendation_date"],current,new_state,actor_role,purpose,now,reason_code,row["model_version"],row["policy_version"],row["feasibility_policy_version"],config.workflow_policy_version))
         conn.commit()
-    _write_external_audit("WORKFLOW_TRANSITION", actor_role, purpose, f"/api/workflow/{workflow_item_id}", now,
-                          {"event_id":event_id,"workflow_item_id":workflow_item_id,"person_id":row["person_id"],"recommendation_date":row["recommendation_date"],
-                           "previous_state":current,"new_state":new_state,"reason_code":reason_code,"model_version":row["model_version"],
-                           "policy_version":row["policy_version"],"feasibility_policy_version":row["feasibility_policy_version"],"workflow_policy_version":config.workflow_policy_version})
+        person_id, recommendation_date = row["person_id"], row["recommendation_date"]
+        model_version, policy_version, feasibility_policy_version = row["model_version"], row["policy_version"], row["feasibility_policy_version"]
+    _write_external_audit("WORKFLOW_TRANSITION", actor_role, purpose, "ALLOWED", f"/api/workflow/{workflow_item_id}",
+                          {"event_id":event_id,"workflow_item_id":workflow_item_id,"person_id":person_id,"recommendation_date":recommendation_date,
+                           "previous_state":current,"new_state":new_state,"reason_code":reason_code,"model_version":model_version,
+                           "policy_version":policy_version,"feasibility_policy_version":feasibility_policy_version,"workflow_policy_version":config.workflow_policy_version})
     return get_item(workflow_item_id) or {}
 
 
 def _require_welfare_actor(actor_role: str, purpose: str) -> None:
     if authorize(actor_role, purpose).allowed is not True or actor_role != SecurityRole.WELFARE_OFFICER.value or purpose != AccessPurpose.WELFARE_SUPPORT.value:
+        _write_external_audit("WORKFLOW_ACCESS", actor_role, purpose, "DENIED",
+                              "workflow_support_action", {"reason": "Welfare-support authorization is required."})
         raise PermissionError("Welfare-support authorization is required.")
 
 
@@ -338,11 +396,11 @@ def record_feedback(workflow_item_id: str, *, helpfulness: int, comment: str | N
     support = item.get("support_event")
     if not support: raise ValueError("Personnel feedback requires recorded support completion.")
     now = datetime.now(timezone.utc).isoformat(); fid = f"FB-{hashlib.sha256(f'{workflow_item_id}|{now}'.encode()).hexdigest()[:20]}"
-    with _connect() as conn:
+    with _connection() as conn:
         conn.execute("INSERT INTO workflow_feedback(feedback_id,workflow_item_id,support_event_id,person_id,helpfulness,comment,follow_up_requested,submitted_at,recorded_by_role) VALUES (?,?,?,?,?,?,?,?,?)",
                      (fid,workflow_item_id,support["support_event_id"],item["person_id"],helpfulness,(comment or "").strip() or None,int(follow_up_requested),now,actor_role))
         conn.execute("UPDATE workflow_items SET feedback_submitted=1 WHERE workflow_item_id=?", (workflow_item_id,)); conn.commit()
-    _write_external_audit("WORKFLOW_FEEDBACK_RECORDED", actor_role, purpose, f"/api/workflow/{workflow_item_id}/feedback", now,
+    _write_external_audit("WORKFLOW_FEEDBACK_RECORDED", actor_role, purpose, "ALLOWED", f"/api/workflow/{workflow_item_id}/feedback",
                           {"feedback_id":fid,"workflow_item_id":workflow_item_id,"person_id":item["person_id"],"support_event_id":support["support_event_id"],"follow_up_requested":bool(follow_up_requested)})
     return get_item(workflow_item_id) or {}
 
@@ -361,7 +419,7 @@ def schedule_followup(workflow_item_id: str, scheduled_for: str, actor_role: str
     support = item.get("support_event")
     if not support: raise ValueError("Follow-up requires a recorded support event.")
     now = datetime.now(timezone.utc).isoformat()
-    with _connect() as conn:
+    with _connection() as conn:
         conn.execute("BEGIN IMMEDIATE")
         active = conn.execute("SELECT followup_id FROM workflow_followups WHERE workflow_item_id=? AND status IN ('SCHEDULED','DUE') ORDER BY last_updated_at DESC LIMIT 1", (workflow_item_id,)).fetchone()
         if active:
@@ -387,21 +445,27 @@ def schedule_followup(workflow_item_id: str, scheduled_for: str, actor_role: str
             conn.execute("INSERT INTO workflow_audit_events(event_id,workflow_item_id,person_id,recommendation_date,previous_state,new_state,actor_role,purpose,timestamp,reason_code,model_version,policy_version,feasibility_policy_version,workflow_policy_version) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                          (event_id,workflow_item_id,item["person_id"],item["date"],item["workflow_state"],"FOLLOW_UP_SCHEDULED",actor_role,purpose,now,reason,item["model_version"],item["policy_version"],item["feasibility_policy_version"],WorkflowPolicyConfig().workflow_policy_version))
         conn.commit()
-    _write_external_audit("WORKFLOW_FOLLOWUP", actor_role, purpose, f"/api/workflow/{workflow_item_id}/follow-up", now,
-                          {"workflow_item_id":workflow_item_id,"person_id":item["person_id"],"followup_id":followup_id,"scheduled_for":when.astimezone(timezone.utc).isoformat(),"reason_code":reason,**({"event_id":event_id} if event_id else {})})
+    _write_external_audit("WORKFLOW_FOLLOWUP", actor_role, purpose, "ALLOWED", f"/api/workflow/{workflow_item_id}/follow-up",
+                          {"workflow_item_id":workflow_item_id,"person_id":item["person_id"],"followup_id":followup_id,"scheduled_for":when.astimezone(timezone.utc).isoformat(),"reason_code":reason,"event_id":event_id})
     return get_item(workflow_item_id) or {}
 
 
 def list_followups(status: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
     ensure_workflow_items(); limit = max(1, min(limit, 200)); now = datetime.now(timezone.utc)
-    with _connect() as conn:
+    with _connection() as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute("""SELECT f.*, w.risk_band, w.recommended_action, w.priority, w.feasibility_status,
             w.constraint_flags, w.last_actor_role, w.workflow_state, s.completed_at AS support_completed_at,
-            s.support_action, s.actor_role AS support_actor_role
+            s.support_action, s.actor_role AS support_actor_role,
+            fb.follow_up_requested AS feedback_follow_up_requested
             FROM workflow_followups f
             JOIN workflow_items w ON w.workflow_item_id=f.workflow_item_id
             JOIN workflow_support_events s ON s.support_event_id=f.support_event_id
+            LEFT JOIN (
+                SELECT workflow_item_id, follow_up_requested,
+                       ROW_NUMBER() OVER (PARTITION BY workflow_item_id ORDER BY submitted_at DESC, feedback_id DESC) AS rn
+                FROM workflow_feedback
+            ) fb ON fb.workflow_item_id = f.workflow_item_id AND fb.rn = 1
             ORDER BY f.scheduled_for ASC, f.followup_id ASC LIMIT ?""", (limit,)).fetchall()
     out: list[dict[str, Any]] = []
     for r in rows:
@@ -416,26 +480,34 @@ def list_followups(status: str | None = None, limit: int = 100) -> list[dict[str
             "recommended_action": r["recommended_action"], "priority": r["priority"], "feasibility_status": r["feasibility_status"],
             "constraint_flags": r["constraint_flags"], "workflow_state": r["workflow_state"],
             "support_completed_at": r["support_completed_at"], "support_action": r["support_action"],
-            "support_actor_role": r["support_actor_role"], "follow_up_requested": False,
+            "support_actor_role": r["support_actor_role"],
+            "follow_up_requested": bool(r["feedback_follow_up_requested"]) if r["feedback_follow_up_requested"] is not None else False,
         })
     return out
 
 
 def complete_followup(followup_id: str, actor_role: str, purpose: str) -> dict[str, Any]:
     _require_welfare_actor(actor_role, purpose); ensure_workflow_items(); now=datetime.now(timezone.utc).isoformat()
-    with _connect() as conn:
+    with _connection() as conn:
         conn.row_factory = sqlite3.Row
         conn.execute("BEGIN IMMEDIATE")
-        row=conn.execute("SELECT f.*,w.* FROM workflow_followups f JOIN workflow_items w ON w.workflow_item_id=f.workflow_item_id WHERE f.followup_id=?",(followup_id,)).fetchone()
+        row=conn.execute("""SELECT f.status AS followup_status, f.person_id AS fu_person_id,
+            w.workflow_item_id AS wi_id, w.workflow_state AS wi_state, w.recommendation_date AS wi_date,
+            w.model_version AS wi_model_version, w.policy_version AS wi_policy_version,
+            w.feasibility_policy_version AS wi_feasibility_policy_version
+            FROM workflow_followups f JOIN workflow_items w ON w.workflow_item_id=f.workflow_item_id
+            WHERE f.followup_id=?""",(followup_id,)).fetchone()
         if not row: raise KeyError("Follow-up not found")
-        workflow_id=row[1]; current=row["workflow_state"]
-        if row[5] == "COMPLETED": raise ValueError("Follow-up is already completed.")
+        workflow_id=row["wi_id"]; current=row["wi_state"]
+        if row["followup_status"] == "COMPLETED": raise ValueError("Follow-up is already completed.")
         if current not in {"FOLLOW_UP_SCHEDULED","FOLLOW_UP_DUE"}: raise ValueError("Workflow is not in a follow-up state.")
         conn.execute("UPDATE workflow_followups SET status='COMPLETED',completed_at=?,completed_by_role=?,last_updated_at=? WHERE followup_id=?",(now,actor_role,now,followup_id))
         conn.execute("UPDATE workflow_items SET workflow_state='FOLLOW_UP_COMPLETED',last_transition_at=?,last_actor_role=?,last_reason_code=? WHERE workflow_item_id=?",(now,actor_role,"FOLLOW_UP_COMPLETED_BY_HUMAN",workflow_id))
         event_id=f"WFE-{hashlib.sha256(f'{workflow_id}|FOLLOW_UP_COMPLETED|{now}'.encode()).hexdigest()[:20]}"
         conn.execute("INSERT INTO workflow_audit_events(event_id,workflow_item_id,person_id,recommendation_date,previous_state,new_state,actor_role,purpose,timestamp,reason_code,model_version,policy_version,feasibility_policy_version,workflow_policy_version) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                     (event_id,workflow_id,row["person_id"],row["recommendation_date"],current,"FOLLOW_UP_COMPLETED",actor_role,purpose,now,"FOLLOW_UP_COMPLETED_BY_HUMAN",row["model_version"],row["policy_version"],row["feasibility_policy_version"],WorkflowPolicyConfig().workflow_policy_version))
+                     (event_id,workflow_id,row["fu_person_id"],row["wi_date"],current,"FOLLOW_UP_COMPLETED",actor_role,purpose,now,"FOLLOW_UP_COMPLETED_BY_HUMAN",row["wi_model_version"],row["wi_policy_version"],row["wi_feasibility_policy_version"],WorkflowPolicyConfig().workflow_policy_version))
         conn.commit()
-    _write_external_audit("WORKFLOW_FOLLOWUP_COMPLETED", actor_role, purpose, f"/api/workflow/{workflow_id}/follow-up", now,{"event_id":event_id,"workflow_item_id":workflow_id,"person_id":row["person_id"],"followup_id":followup_id})
+        person_id = row["fu_person_id"]
+    _write_external_audit("WORKFLOW_FOLLOWUP_COMPLETED", actor_role, purpose, "ALLOWED", f"/api/workflow/{workflow_id}/follow-up",
+                          {"event_id":event_id,"workflow_item_id":workflow_id,"person_id":person_id,"followup_id":followup_id})
     return get_item(workflow_id) or {}

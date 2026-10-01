@@ -1,0 +1,64 @@
+# FORTIFY prototype — local container orchestration.
+#
+#   docker compose up --build
+#
+# 1. "pipeline" regenerates the deterministic demo dataset + models
+#    (seed 42, 500 personnel, 180 days — same output as scripts/build_all.py)
+#    into named volumes, then exits.
+# 2. "fortify-backend" starts the FastAPI API against those volumes.
+# 3. "fortify-frontend" serves the built SPA on http://localhost:5173 and
+#    proxies /api and /health to the backend (same-origin, no CORS needed).
+#
+# NOTE: this is the unauthenticated prototype. It trusts the X-Fortify-Role /
+# X-Fortify-Purpose headers. Do not expose it to untrusted networks
+# (see SECURITY_MODEL.md).
+
+services:
+  pipeline:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    command: ["python", "scripts/build_all.py"]
+    environment:
+      # The demo workflow state must also live on the mounted volume (the
+      # image's backend/ tree is read-only for the runtime user).
+      FORTIFY_DATABASE_URL: sqlite:////app/data/runtime/fortify.db
+    volumes:
+      - fortify-data:/app/data/generated
+      - fortify-runtime:/app/data/runtime
+      - fortify-artifacts:/app/artifacts
+    restart: "no"
+
+  fortify-backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    depends_on:
+      pipeline:
+        condition: service_completed_successfully
+    environment:
+      # Absolute path inside the mounted volume (the image tree is read-only
+      # for the runtime user).
+      FORTIFY_DATABASE_URL: sqlite:////app/data/runtime/fortify.db
+      FORTIFY_CORS_ORIGINS: http://localhost:5173
+    volumes:
+      - fortify-data:/app/data/generated
+      - fortify-runtime:/app/data/runtime
+      - fortify-artifacts:/app/artifacts
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+  fortify-frontend:
+    build:
+      context: ./frontend
+    depends_on:
+      - fortify-backend
+    ports:
+      - "5173:80"
+    restart: unless-stopped
+
+volumes:
+  fortify-data:
+  fortify-runtime:
+  fortify-artifacts:

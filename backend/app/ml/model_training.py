@@ -11,15 +11,22 @@ import pandas as pd
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import average_precision_score, roc_auc_score
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 from .model_config import FORBIDDEN_INPUT_COLUMNS, WELLNESS_INPUT_PATTERNS, ModelConfig
-from .model_evaluation import evaluate_binary_predictions
+from .model_evaluation import evaluate_binary_predictions, evaluate_hard_predictions
 from .target_engineering import build_future_wellness_target
 
 KEY_COLUMNS = {"person_id", "date"}
 NON_MODEL_COLUMNS = FORBIDDEN_INPUT_COLUMNS | KEY_COLUMNS | {"target", "target_observed", "target_horizon_days", "target_definition"}
+
+RULE_BASELINE_NAME = "sustained_load_rule"
+RULE_BASELINE_DEFINITION = (
+    "Heuristic comparator, not a product rule: flag when average rest over the last 7 days "
+    "is below 6.5 hours or total duty hours over the last 7 days exceed 70 (about 10h/day)."
+)
 
 
 class RiskModelTrainer:
@@ -153,6 +160,15 @@ class RiskModelTrainer:
             "temporal_splits": split_summary,
             "validation_metrics": validation_metrics,
             "test_metrics": test_metrics,
+            "baseline_comparison": self._baseline_comparison(train, valid, test),
+            "person_disjoint_diagnostic": self._person_disjoint_diagnostic(labeled, features),
+            "metric_honesty_note": (
+                "All metrics are computed on synthetic data whose labels are derived from the same "
+                "simulated operational variables used as features; they bound what the model can learn "
+                "in simulation and are not evidence of real-world predictive value. The temporal split "
+                "shares personnel across partitions, so the person-disjoint diagnostic is the more "
+                "conservative view for deployment on unseen personnel."
+            ),
             "config": asdict(self.config),
         }
 
@@ -174,6 +190,58 @@ class RiskModelTrainer:
             "positive_count": int(frame["target"].sum()),
             "negative_count": int((frame["target"] == 0).sum()),
             "positive_rate": float(frame["target"].mean()),
+        }
+
+    def _baseline_comparison(self, train: pd.DataFrame, valid: pd.DataFrame, test: pd.DataFrame) -> dict[str, Any]:
+        """Transparent comparators so the model's added value is measurable."""
+        majority_class = int(train["target"].value_counts().idxmax())
+        comparison: dict[str, Any] = {
+            "majority_baseline": {"predicts": majority_class, "note": "Always predicts the training majority class."},
+            RULE_BASELINE_NAME: {"definition": RULE_BASELINE_DEFINITION},
+        }
+        for name, frame in (("validation", valid), ("test", test)):
+            y = frame["target"].to_numpy(dtype=int)
+            majority_pred = np.full_like(y, majority_class)
+            comparison[name] = {
+                "majority_baseline": evaluate_hard_predictions(y, majority_pred),
+                RULE_BASELINE_NAME: evaluate_hard_predictions(y, self._rule_baseline_flags(frame)),
+            }
+        return comparison
+
+    @staticmethod
+    def _rule_baseline_flags(frame: pd.DataFrame) -> np.ndarray:
+        if "avg_rest_7d" not in frame.columns or "duty_hours_7d" not in frame.columns:
+            raise ValueError("Rule baseline requires avg_rest_7d and duty_hours_7d columns")
+        flags = (frame["avg_rest_7d"] < 6.5) | (frame["duty_hours_7d"] > 70.0)
+        return flags.fillna(False).to_numpy(dtype=int)
+
+    def _person_disjoint_diagnostic(self, labeled: pd.DataFrame, features: list[str]) -> dict[str, Any]:
+        """Evaluate on personnel unseen in training (80/20 person split, seeded).
+
+        This is a diagnostic, not the deployment metric: the operational model is
+        refreshed over time on the same population. It quantifies how much of the
+        temporal-split performance comes from seeing the same people in train and test.
+        """
+        persons = np.sort(labeled["person_id"].astype(str).unique())
+        rng = np.random.default_rng(self.config.random_state)
+        perm = rng.permutation(persons)
+        split = max(1, int(len(perm) * 0.8))
+        train_persons = set(perm[:split])
+        train_mask = labeled["person_id"].astype(str).isin(train_persons)
+        train_part = labeled[train_mask]
+        test_part = labeled[~train_mask]
+        diagnostic_model = self._build_pipeline(labeled, features)
+        diagnostic_model.fit(train_part[features], train_part["target"])
+        prob = diagnostic_model.predict_proba(test_part[features])[:, 1]
+        y = test_part["target"].to_numpy(dtype=int)
+        return {
+            "split": "80/20 by person_id (seeded, person-disjoint)",
+            "train_persons": int(len(train_persons)),
+            "test_persons": int(len(persons) - len(train_persons)),
+            "test_rows": int(len(test_part)),
+            "test_positive_rate": float(y.mean()) if len(y) else None,
+            "roc_auc": float(roc_auc_score(y, prob)) if np.unique(y).size == 2 else None,
+            "average_precision": float(average_precision_score(y, prob)) if np.unique(y).size == 2 else None,
         }
 
     @staticmethod

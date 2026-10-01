@@ -1,15 +1,19 @@
 export type HealthResponse = { status: string; service: string }
 
 import type { DashboardOverview, PersonDetail, TrendPoint, UnitSummary } from '../types/dashboard'
-import type { WorkflowItem, WorkflowState } from '../types/workflow'
+import type { FollowUpRecord, WorkflowItem, WorkflowState } from '../types/workflow'
 import type { AuditRecord, DataSource, PersonnelRow, SearchResult } from '../types/product'
-import type { FollowUpRecord } from '../types/workflow'
 
 export const FORTIFY_ROLE = import.meta.env.VITE_FORTIFY_ROLE ?? 'WELFARE_OFFICER'
 export const FORTIFY_PURPOSE = import.meta.env.VITE_FORTIFY_PURPOSE ?? 'WELFARE_SUPPORT'
 
+// Base URL of the FORTIFY backend. Empty = same origin (dev proxy or reverse
+// proxy in deployment). Override with VITE_API_BASE_URL when the API lives on
+// another host.
+const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/$/, '')
+
 async function request<T>(path: string, init: RequestInit = {}, purpose: string = FORTIFY_PURPOSE): Promise<T> {
-  const response = await fetch(path, {
+  const response = await fetch(`${API_BASE}${path}`, {
     ...init,
     headers: {
       'Content-Type': 'application/json',
@@ -23,8 +27,17 @@ async function request<T>(path: string, init: RequestInit = {}, purpose: string 
     if (response.status === 401 || response.status === 403) {
       throw new Error('Access restricted: this workspace does not have the required authorization.')
     }
-    const text = await response.text()
-    throw new Error(text || `Backend returned ${response.status}`)
+    if (response.status === 503) {
+      throw new Error('The demonstration dataset is not available on the backend. Generate it with: python scripts/build_all.py')
+    }
+    let detail = ''
+    try {
+      const body = await response.json()
+      detail = typeof body?.detail === 'string' ? body.detail : ''
+    } catch {
+      detail = ''
+    }
+    throw new Error(detail || `Backend returned ${response.status}`)
   }
 
   return response.json() as Promise<T>
@@ -92,6 +105,6 @@ export const completeWorkflowFollowUp = (followupId: string) =>
   })
 
 export const getFollowUps = (status?: string) =>
-  request<{ items: FollowUpRecord[]; count: number }>(
+  request<{ items: FollowUpRecord[]; count: number; privacy_note?: string }>(
     `/api/workflow/follow-ups?limit=200${status ? `&status=${encodeURIComponent(status)}` : ''}`,
   )

@@ -8,7 +8,7 @@ function concern(item: Row) {
   if (item.risk_band === 'MODERATE') return ['Worth checking', 'moderate'] as const
   return ['No current concern', 'low'] as const
 }
-function status(value: WorkflowItem['workflow_state']) { return ({ NEW:'New', ACKNOWLEDGED:'Acknowledged', IN_REVIEW:'Being reviewed', SUPPORT_PLANNED:'Support planned', COMPLETED:'Completed', DEFERRED:'Deferred', DISMISSED:'Dismissed' })[value] }
+function status(value: WorkflowItem['workflow_state']) { const labels: Record<WorkflowItem['workflow_state'], string> = { NEW:'New', ACKNOWLEDGED:'Acknowledged', IN_REVIEW:'Being reviewed', SUPPORT_PLANNED:'Support planned', SUPPORT_COMPLETED:'Support completed', FOLLOW_UP_SCHEDULED:'Follow-up scheduled', FOLLOW_UP_DUE:'Follow-up due', FOLLOW_UP_COMPLETED:'Follow-up completed', CLOSED:'Closed', COMPLETED:'Completed', DEFERRED:'Deferred', DISMISSED:'Dismissed' }; return labels[value] }
 export function AttentionTable({ rows, onOpen }: { rows: Row[]; onOpen: (personId: string) => void }) {
   return <div className="data-table-wrap">
     <div className="table-scroll">
@@ -18,13 +18,13 @@ export function AttentionTable({ rows, onOpen }: { rows: Row[]; onOpen: (personI
           <td><button className="table-person" type="button" onClick={(event) => { event.stopPropagation(); onOpen(row.person_id) }}><strong>{row.person_id}</strong><small>{row.date}</small></button></td>
           <td className="mono muted">{row.unit_id ?? '—'}</td>
           <td><StatusBadge label={label} tone={tone} /></td>
-          <td><TrendIndicator trend={row.trend ?? (row.risk_band === 'HIGH' ? 'RISING' : 'STABLE')} /></td>
-          <td className="indicator-copy">{row.rationale?.split(';')[0] || 'Multiple operational indicators are being reviewed.'}</td>
+          <td><TrendIndicator trend={row.trend ?? 'STABLE'} /></td>
+          <td className="indicator-copy">{row.rationale?.split(';')[0] || 'Operational summary not available for this day.'}</td>
           <td className="muted">{status(row.workflow_state)}</td>
           <td><button className="button table-action" type="button" onClick={(event) => { event.stopPropagation(); onOpen(row.person_id) }}>{row.workflow_state === 'NEW' ? 'Review Case' : 'Open'}</button></td>
         </tr>})}</tbody>
       </table>
     </div>
-    <div className="table-footer"><span>Showing 1–{rows.length} active cases</span><span>Latest available day</span></div>
+    <div className="table-footer"><span>{rows.length} active cases shown</span><span>Latest available day</span></div>
   </div>
 }

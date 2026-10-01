@@ -1,11 +1,14 @@
-fastapi>=0.115,<1
-uvicorn[standard]>=0.34,<1
-pydantic>=2.10,<3
-pandas>=2.2,<3
-numpy>=2.0,<3
-scikit-learn>=1.6,<2
-scipy>=1.14,<2
-cryptography>=44,<47
-PyJWT>=2.10,<3
-pytest>=8.3,<9
-httpx>=0.28,<1
+# FORTIFY backend — pinned for deterministic regeneration of demo data and models.
+# After changing a pin, re-run `python scripts/build_all.py` and the test suite,
+# and re-verify the metrics in artifacts/ before committing.
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
+pydantic==2.13.4
+pandas==2.3.3
+numpy==2.4.2
+scipy==1.17.1
+scikit-learn==1.9.0
+joblib==1.5.3
+cryptography==46.0.7
+httpx==0.28.1
+pytest==8.4.2

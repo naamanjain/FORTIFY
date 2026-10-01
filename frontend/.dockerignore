@@ -1,0 +1,10 @@
+# Keep the frontend build context lean; dependencies come from npm ci.
+node_modules
+dist
+
+# VCS / editor
+.git
+.env
+.env.*
+!.env.example
+*.log

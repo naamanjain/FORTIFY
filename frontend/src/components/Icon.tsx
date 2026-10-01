@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react'
 
-type IconName = 'shield' | 'alert' | 'person' | 'units' | 'trend' | 'data' | 'review' | 'audit' | 'settings' | 'search' | 'bell' | 'help' | 'chevron' | 'arrowUp' | 'arrowDown' | 'arrowRight' | 'check' | 'lock' | 'refresh' | 'external'
+export type IconName = 'shield' | 'alert' | 'person' | 'units' | 'trend' | 'data' | 'review' | 'calendar' | 'audit' | 'settings' | 'search' | 'bell' | 'help' | 'chevron' | 'arrowUp' | 'arrowDown' | 'arrowRight' | 'check' | 'lock' | 'refresh' | 'external'
 
 const paths: Record<IconName, ReactNode> = {
   shield: <path d="M12 3 5 6v5c0 4.5 2.7 7.8 7 10 4.3-2.2 7-5.5 7-10V6l-7-3Zm0 5v10" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />,
@@ -9,6 +9,7 @@ const paths: Record<IconName, ReactNode> = {
   units: <><rect x="4" y="5" width="6" height="6" rx="1" fill="none" stroke="currentColor" strokeWidth="1.6"/><rect x="14" y="5" width="6" height="6" rx="1" fill="none" stroke="currentColor" strokeWidth="1.6"/><rect x="9" y="13" width="6" height="6" rx="1" fill="none" stroke="currentColor" strokeWidth="1.6"/><path d="M10 8h4M12 11v2" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round"/></>,
   trend: <path d="m4 16 5-5 3 3 6-7M14 7h4v4" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"/>,
   data: <><ellipse cx="12" cy="6.5" rx="6.5" ry="2.8" fill="none" stroke="currentColor" strokeWidth="1.6"/><path d="M5.5 6.5v5c0 1.6 2.9 2.8 6.5 2.8s6.5-1.2 6.5-2.8v-5M5.5 11.5v5c0 1.6 2.9 2.8 6.5 2.8s6.5-1.2 6.5-2.8v-5" fill="none" stroke="currentColor" strokeWidth="1.6"/></>,
+  calendar: <><rect x="4" y="6" width="16" height="14" rx="2" fill="none" stroke="currentColor" strokeWidth="1.6"/><path d="M4 10h16M9 3.5V7M15 3.5V7" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round"/></>,
   review: <><rect x="5" y="4" width="14" height="16" rx="2" fill="none" stroke="currentColor" strokeWidth="1.6"/><path d="M8.5 9h7M8.5 13h7M8.5 17h4" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round"/></>,
   audit: <><path d="M7 4h10v4H7zM5 8h14v11H5z" fill="none" stroke="currentColor" strokeWidth="1.5"/><path d="M9 12h6M9 15h4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></>,
   settings: <path d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Zm0-5v2M12 18.5v2M4.9 5l1.4 1.4M17.7 17.7l1.4 1.4M3 12h2M19 12h2M4.9 19l1.4-1.4M17.7 6.4 19.1 5" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round"/>,

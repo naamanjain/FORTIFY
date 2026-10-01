@@ -43,7 +43,7 @@ class DecisionConfig:
         0.55,
         0.60,
     )
-    minimum_validation_recall: float = 0.80
+    minimum_validation_precision: float = 0.55
     low_band_upper: float = 0.25
     moderate_band_upper: float = 0.50
     calibration_bins: int = 10
@@ -55,8 +55,8 @@ class DecisionConfig:
             raise ValueError("decision thresholds must be strictly inside (0, 1)")
         if tuple(sorted(set(candidates))) != candidates:
             raise ValueError("decision thresholds must be strictly increasing")
-        if not 0 < self.minimum_validation_recall <= 1:
-            raise ValueError("minimum_validation_recall must be in (0, 1]")
+        if not 0 < self.minimum_validation_precision <= 1:
+            raise ValueError("minimum_validation_precision must be in (0, 1]")
         if not 0 < self.low_band_upper < self.moderate_band_upper < 1:
             raise ValueError("risk-band cutoffs must satisfy 0 < low < moderate < 1")
         if self.calibration_bins < 2:
@@ -67,7 +67,7 @@ class DecisionConfig:
 class ThresholdSelection:
     selected_threshold: float
     rule: str
-    minimum_validation_recall: float
+    minimum_validation_precision: float
 
 
 def threshold_metrics(y_true: Iterable[int], probabilities: Iterable[float], threshold: float) -> dict[str, Any]:
@@ -122,26 +122,38 @@ def analyze_thresholds(
 def select_operating_threshold(
     threshold_table: pd.DataFrame,
     *,
-    minimum_validation_recall: float = 0.80,
+    minimum_validation_precision: float = 0.55,
 ) -> ThresholdSelection:
+    """Pick the operating point for welfare triage.
+
+    Policy: among candidate thresholds whose validation precision meets the
+    configured floor, select the highest validation F1 (ties: higher recall,
+    then lower threshold). A precision floor keeps flags mostly-correct so the
+    review queue prioritizes instead of flagging most of the population. The
+    floor is prototype tuning, not departmental policy, and requires
+    real-world review before operational use.
+    """
     required = {"threshold", "recall", "f1", "precision"}
     missing = sorted(required.difference(threshold_table.columns))
     if missing:
         raise ValueError(f"Threshold table missing columns: {missing}")
-    eligible = threshold_table[threshold_table["recall"] >= minimum_validation_recall].copy()
+    eligible = threshold_table[threshold_table["precision"] >= minimum_validation_precision].copy()
     if eligible.empty:
-        raise ValueError("No candidate threshold satisfies the configured recall floor")
+        raise ValueError(
+            "No candidate threshold satisfies the configured validation precision floor; "
+            "adjust candidates or the floor for this dataset."
+        )
     eligible = eligible.sort_values(
-        ["f1", "precision", "threshold"], ascending=[False, False, True], kind="mergesort"
+        ["f1", "recall", "threshold"], ascending=[False, False, True], kind="mergesort"
     )
     chosen = float(eligible.iloc[0]["threshold"])
     return ThresholdSelection(
         selected_threshold=chosen,
         rule=(
             "Select the candidate threshold with the highest validation F1 among thresholds "
-            "meeting the configured validation recall floor; break ties using precision, then lower threshold."
+            "meeting the configured validation precision floor; break ties using recall, then lower threshold."
         ),
-        minimum_validation_recall=float(minimum_validation_recall),
+        minimum_validation_precision=float(minimum_validation_precision),
     )
 
 
