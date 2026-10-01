@@ -1,55 +1,61 @@
 from __future__ import annotations
 
+import csv
 import json
-import os
-import sqlite3
-from pathlib import Path
+from datetime import datetime, timezone
 from threading import RLock
 from typing import Any
 
 import pandas as pd
 from fastapi import APIRouter, Header, HTTPException, Query
 
-from app.core.config import settings
+from app.core.database import check_database
+from app.core.paths import AUDIT_PATH as _DEFAULT_AUDIT_PATH
+from app.core.paths import DATA_DIR as _DEFAULT_DATA_DIR
 from app.security.audit import AuditEvent, AuditLog
 from app.security.rbac import authorize
 from app.security.security_config import AccessPurpose, SecurityRole
-from app.services.workflow import get_history, get_item, _workflow_id
+from app.services.workflow import DataUnavailable, _workflow_id, get_item
 
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 
-ROOT = Path(__file__).resolve().parents[4]
-DATA_DIR = Path(os.getenv("FORTIFY_DATA_DIR", ROOT / "data" / "generated"))
-AUDIT_PATH = Path(os.getenv("FORTIFY_AUDIT_LOG", ROOT / "artifacts" / "phase8" / "dashboard_audit.jsonl"))
+# Module-level so tests can patch these locations in isolation.
+DATA_DIR = _DEFAULT_DATA_DIR
+AUDIT_PATH = _DEFAULT_AUDIT_PATH
 
 _SUMMARY_CACHE: dict[str, Any] = {}
 _SUMMARY_SIGNATURE: tuple[int, int] | None = None
 _SUMMARY_CACHE_LOCK = RLock()
+_RECORD_COUNTS_CACHE: dict[str, tuple[tuple[int, ...], int]] = {}
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _read_csv(name: str, columns: list[str] | None = None) -> pd.DataFrame:
     path = DATA_DIR / name
     if not path.exists():
-        raise HTTPException(status_code=503, detail=f"Required dashboard artifact is unavailable: {name}")
+        raise HTTPException(
+            status_code=503,
+            detail=f"Required dashboard artifact is unavailable: {name}. Generate the demo dataset first (python scripts/build_all.py).",
+        )
     try:
         return pd.read_csv(path, usecols=columns)
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"Unable to read dashboard artifact: {name}") from exc
 
 
+def _audit_access(role: str, purpose: str, outcome: str, resource: str, details: dict[str, Any]) -> None:
+    AuditLog(AUDIT_PATH).append(AuditEvent(
+        event_type="DASHBOARD_ACCESS", actor_role=role, purpose=purpose, outcome=outcome,
+        resource=resource, timestamp=_utc_now(), details=details))
+
+
 def _authorize(role: str, purpose: str, resource: str) -> None:
     decision = authorize(role, purpose)
-    AuditLog(AUDIT_PATH).append(
-        AuditEvent(
-            event_type="DASHBOARD_ACCESS",
-            actor_role=role,
-            purpose=purpose,
-            outcome="ALLOWED" if decision.allowed else "DENIED",
-            resource=resource,
-            timestamp=pd.Timestamp.utcnow().isoformat(),
-            details={"policy_version": decision.policy_version},
-        )
-    )
+    _audit_access(role, purpose, "ALLOWED" if decision.allowed else "DENIED", resource,
+                  {"policy_version": decision.policy_version})
     if not decision.allowed:
         raise HTTPException(status_code=403, detail=decision.reason)
 
@@ -62,15 +68,21 @@ def _require_headers(x_fortify_role: str | None, x_fortify_purpose: str | None) 
     return role, purpose
 
 
-def _require_welfare(role: str, purpose: str) -> None:
+def _require_welfare(role: str, purpose: str, resource: str) -> None:
     if role != SecurityRole.WELFARE_OFFICER.value or purpose != AccessPurpose.WELFARE_SUPPORT.value:
+        _audit_access(role, purpose, "DENIED", resource,
+                      {"reason": "Individual welfare access requires welfare-support authorization."})
         raise HTTPException(status_code=403, detail="Individual welfare access requires welfare-support authorization.")
 
 
-def _require_aggregate(role: str, purpose: str) -> None:
+def _require_aggregate(role: str, purpose: str, resource: str) -> None:
     if purpose != AccessPurpose.AGGREGATE_OPERATIONS.value:
+        _audit_access(role, purpose, "DENIED", resource,
+                      {"reason": "This view requires aggregate-operations purpose."})
         raise HTTPException(status_code=403, detail="This view requires aggregate-operations purpose.")
     if role not in {SecurityRole.WELFARE_OFFICER.value, SecurityRole.COMMANDER.value}:
+        _audit_access(role, purpose, "DENIED", resource,
+                      {"reason": "This view is restricted to authorized operational roles."})
         raise HTTPException(status_code=403, detail="This view is restricted to authorized operational roles.")
 
 
@@ -95,11 +107,18 @@ def _load_phase7() -> pd.DataFrame:
     )
 
 
+def _artifact_signature(path: Path) -> int | None:
+    """Mtime signature for cache invalidation; missing artifacts are None so a
+    deployment without generated data degrades to the 503 path instead of a
+    raw FileNotFoundError, and the cache still invalidates once data appears."""
+    return path.stat().st_mtime_ns if path.exists() else None
+
+
 def _dashboard_frame() -> pd.DataFrame:
     global _SUMMARY_SIGNATURE
     p6_path = DATA_DIR / "intervention_recommendations.csv"
     p7_path = DATA_DIR / "intervention_feasibility.csv"
-    signature = (p6_path.stat().st_mtime_ns, p7_path.stat().st_mtime_ns)
+    signature = (_artifact_signature(p6_path), _artifact_signature(p7_path))
     with _SUMMARY_CACHE_LOCK:
         cached = _SUMMARY_CACHE.get("joined")
         if cached is not None and _SUMMARY_SIGNATURE == signature:
@@ -113,6 +132,25 @@ def _dashboard_frame() -> pd.DataFrame:
         _SUMMARY_CACHE["joined"] = joined.copy()
         _SUMMARY_SIGNATURE = signature
         return joined
+
+
+def _record_count(name: str) -> int | None:
+    """Count data rows (not header) of a CSV, honoring quoted newlines. Cached by mtime."""
+    path = DATA_DIR / name
+    if not path.exists():
+        return None
+    signature = (path.stat().st_mtime_ns,)
+    cached = _RECORD_COUNTS_CACHE.get(name)
+    if cached and cached[0] == signature:
+        return cached[1]
+    try:
+        with path.open("r", encoding="utf-8", newline="") as handle:
+            count = sum(1 for _ in csv.reader(handle))
+        count = max(0, count - 1)
+    except OSError:
+        return None
+    _RECORD_COUNTS_CACHE[name] = (signature, count)
+    return count
 
 
 @router.get("/overview")
@@ -170,7 +208,7 @@ def units(x_fortify_role: str | None = Header(default=None), x_fortify_purpose: 
 def unit_detail(unit_id: str, x_fortify_role: str | None = Header(default=None), x_fortify_purpose: str | None = Header(default=None)) -> dict[str, Any]:
     role, purpose = _require_headers(x_fortify_role, x_fortify_purpose)
     _authorize(role, purpose, f"/api/dashboard/unit/{unit_id}")
-    _require_aggregate(role, purpose)
+    _require_aggregate(role, purpose, f"/api/dashboard/unit/{unit_id}")
     df = _dashboard_frame().merge(_read_csv("personnel.csv", ["person_id", "unit_id"]), on="person_id", how="left", validate="many_to_one")
     scoped = df[df["unit_id"].astype(str) == unit_id]
     if scoped.empty:
@@ -191,21 +229,21 @@ def unit_detail(unit_id: str, x_fortify_role: str | None = Header(default=None),
 def person_detail(person_id: str, x_fortify_role: str | None = Header(default=None), x_fortify_purpose: str | None = Header(default=None)) -> dict[str, Any]:
     role, purpose = _require_headers(x_fortify_role, x_fortify_purpose)
     _authorize(role, purpose, f"/api/dashboard/person/{person_id}")
-    _require_welfare(role, purpose)
+    _require_welfare(role, purpose, f"/api/dashboard/person/{person_id}")
     df = _dashboard_frame(); person = df[df["person_id"].astype(str) == person_id].sort_values("date")
     if person.empty: raise HTTPException(status_code=404, detail="Personnel record not found")
     history = person.tail(30)
     latest = history.iloc[-1]
-    personnel_path = DATA_DIR / "personnel.csv"
     identity = _read_csv("personnel.csv", ["person_id", "unit_id", "role", "deployment_type"])
     identity_row = identity[identity["person_id"].astype(str) == person_id].iloc[0]
     workflow_id = _workflow_id(person_id, str(latest["date"]))
-    workflow_item = get_item(workflow_id)
-    workflow_history = get_history(workflow_id) if workflow_item else []
+    try:
+        workflow_item = get_item(workflow_id)
+    except DataUnavailable:
+        workflow_item = None
     workflow_payload = None
     if workflow_item:
-        workflow_payload = dict(workflow_item)
-        workflow_payload["history"] = workflow_history
+        workflow_payload = dict(workflow_item)  # get_item already embeds history/support/feedback/followup
     return {"person_id": person_id, "unit_id": str(identity_row["unit_id"]), "role": str(identity_row["role"]), "deployment_type": str(identity_row["deployment_type"]),
             "date_range": [str(history["date"].min()), str(history["date"].max())],
             "latest": {"date": str(latest["date"]), "risk_probability": float(latest["welfare_risk_probability"]), "risk_band": str(latest["risk_band"]),
@@ -222,7 +260,8 @@ def person_detail(person_id: str, x_fortify_role: str | None = Header(default=No
 @router.get("/personnel")
 def personnel(query: str = Query(default="", max_length=40), unit_id: str | None = Query(default=None, max_length=40), risk_band: str | None = Query(default=None), limit: int = Query(default=50, ge=1, le=100),
               x_fortify_role: str | None = Header(default=None), x_fortify_purpose: str | None = Header(default=None)) -> dict[str, Any]:
-    role, purpose = _require_headers(x_fortify_role, x_fortify_purpose); _authorize(role, purpose, "/api/dashboard/personnel"); _require_welfare(role, purpose)
+    role, purpose = _require_headers(x_fortify_role, x_fortify_purpose); _authorize(role, purpose, "/api/dashboard/personnel")
+    _require_welfare(role, purpose, "/api/dashboard/personnel")
     df = _dashboard_frame().merge(_read_csv("personnel.csv", ["person_id", "unit_id"]), on="person_id", how="left", validate="many_to_one")
     latest = df.sort_values("date").groupby("person_id", as_index=False).tail(1)
     if query: latest = latest[latest["person_id"].astype(str).str.contains(query, case=False, regex=False)]
@@ -243,28 +282,31 @@ def search(query: str = Query(min_length=1, max_length=50), limit: int = Query(d
     if purpose == AccessPurpose.AGGREGATE_OPERATIONS.value:
         for unit in matching_units[:limit]: results.append({"type": "UNIT", "key": unit, "title": unit, "detail": "Aggregate operational context"})
         return {"query": query, "results": results, "privacy_note": "Aggregate search does not expose individual personnel records."}
-    _require_welfare(role, purpose)
+    _require_welfare(role, purpose, "/api/dashboard/search")
     for person in sorted(set(units_df.loc[units_df["person_id"].astype(str).str.lower().str.contains(q, regex=False), "person_id"].astype(str)))[:limit]:
         results.append({"type": "PERSONNEL", "key": person, "title": person, "detail": "Authorized welfare profile"})
     for unit in matching_units[:max(0, limit-len(results))]: results.append({"type": "UNIT", "key": unit, "title": unit, "detail": "Aggregate operational context"})
-    return {"query": query, "results": results[:limit]}
+    return {"query": query, "results": results[:limit], "privacy_note": "Search results contain identifiers only; welfare detail requires the person profile view."}
 
 
 @router.get("/data-sources")
 def data_sources(x_fortify_role: str | None = Header(default=None), x_fortify_purpose: str | None = Header(default=None)) -> dict[str, Any]:
-    role, purpose = _require_headers(x_fortify_role, x_fortify_purpose); _authorize(role, purpose, "/api/dashboard/data-sources"); _require_aggregate(role, purpose)
+    role, purpose = _require_headers(x_fortify_role, x_fortify_purpose); _authorize(role, purpose, "/api/dashboard/data-sources")
+    _require_aggregate(role, purpose, "/api/dashboard/data-sources")
     specs = [("Duty records", "duty_events.csv", "Operational"), ("Recovery", "recovery_events.csv", "Operational"), ("Leave", "leave_events.csv", "Operational"),
              ("Deployment", "deployment_events.csv", "Operational"), ("Training", "training_events.csv", "Operational"), ("Incidents", "incident_events.csv", "Operational"),
              ("Personnel", "personnel.csv", "Restricted context"), ("Risk decisions", "risk_decisions.csv", "Derived"), ("Recommendations", "intervention_recommendations.csv", "Derived"),
              ("Feasibility", "intervention_feasibility.csv", "Derived")]
-    sources=[]
+    sources = []
     for label, filename, classification in specs:
-        path=DATA_DIR/filename
-        if not path.exists(): sources.append({"name":label,"status":"Unavailable","records":0,"classification":classification}); continue
-        try: records=max(0,sum(1 for _ in path.open("r", encoding="utf-8"))-1)
-        except OSError: records=0
-        sources.append({"name":label,"status":"Healthy","records":records,"last_updated":pd.Timestamp(path.stat().st_mtime, unit="s", tz="UTC").isoformat(),"classification":classification})
-    return {"environment":"Synthetic demonstration environment", "sources":sources, "privacy_note":"Source contents are not exposed by this endpoint."}
+        path = DATA_DIR / filename
+        if not path.exists():
+            sources.append({"name": label, "status": "Unavailable", "records": 0, "classification": classification}); continue
+        records = _record_count(filename)
+        sources.append({"name": label, "status": "Healthy", "records": records if records is not None else 0,
+                        "last_updated": datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat(),
+                        "classification": classification})
+    return {"environment": "Synthetic demonstration environment", "sources": sources, "privacy_note": "Source contents are not exposed by this endpoint."}
 
 
 @router.get("/audit")
@@ -272,13 +314,14 @@ def audit_view(limit: int = Query(default=25, ge=1, le=100), x_fortify_role: str
     role, purpose = _require_headers(x_fortify_role, x_fortify_purpose); _authorize(role, purpose, "/api/dashboard/audit")
     if role != SecurityRole.AUDITOR.value or purpose != AccessPurpose.AUDIT.value:
         raise HTTPException(status_code=403, detail="Audit view requires auditor authorization.")
-    log=AuditLog(AUDIT_PATH); events=[]
+    log = AuditLog(AUDIT_PATH); events = []
     if AUDIT_PATH.exists():
         for line in AUDIT_PATH.read_text(encoding="utf-8").splitlines()[-limit:]:
             if line.strip():
-                record=json.loads(line); details=record.get("details", {})
-                events.append({"event_type":record.get("event_type"),"actor_role":record.get("actor_role"),"purpose":record.get("purpose"),"outcome":record.get("outcome"),"resource":record.get("resource"),"timestamp":record.get("timestamp"),"details":details})
-    return {"chain_valid": log.verify_chain(), "event_count": len(events), "events": events, "privacy_note":"Audit output contains governance metadata only; raw wellness responses are excluded."}
+                record = json.loads(line); details = record.get("details", {})
+                events.append({"event_type": record.get("event_type"), "actor_role": record.get("actor_role"), "purpose": record.get("purpose"),
+                               "outcome": record.get("outcome"), "resource": record.get("resource"), "timestamp": record.get("timestamp"), "details": details})
+    return {"chain_valid": log.verify_chain(), "event_count": len(events), "events": events, "privacy_note": "Audit output contains governance metadata only; raw wellness responses are excluded."}
 
 
 @router.get("/system-health")
@@ -286,12 +329,16 @@ def system_health(x_fortify_role: str | None = Header(default=None), x_fortify_p
     role, purpose = _require_headers(x_fortify_role, x_fortify_purpose); _authorize(role, purpose, "/api/dashboard/system-health")
     if role not in {SecurityRole.SYSTEM_ADMINISTRATOR.value, SecurityRole.AUDITOR.value}:
         raise HTTPException(status_code=403, detail="System health is restricted to administrative or audit roles.")
-    db_path = Path(settings.database_url.removeprefix("sqlite:///")) if settings.database_url.startswith("sqlite:///") else None
-    audit_valid=AuditLog(AUDIT_PATH).verify_chain()
-    artifacts=["personnel.csv","intervention_recommendations.csv","intervention_feasibility.csv","risk_predictions.csv"]
-    artifact_status={name:(DATA_DIR/name).exists() for name in artifacts}
-    db_ok=bool(db_path and db_path.exists())
-    with _SUMMARY_CACHE_LOCK: cache_ready="joined" in _SUMMARY_CACHE
-    return {"application":{"api":"Healthy","database":"Healthy" if db_ok else "Warning","cache":"Healthy" if cache_ready else "Cold"},
-            "data":{"artifacts":artifact_status}, "governance":{"access_control":"Active","audit_chain":"Healthy" if audit_valid else "Failed","security_boundary":"Prototype"},
-            "synthetic_demo":True}
+    db_ok = check_database()
+    audit_valid = AuditLog(AUDIT_PATH).verify_chain()
+    # Only artifacts the running API actually consumes at request time.
+    artifacts = ["personnel.csv", "intervention_recommendations.csv", "intervention_feasibility.csv"]
+    artifact_status = {name: (DATA_DIR / name).exists() for name in artifacts}
+    with _SUMMARY_CACHE_LOCK: cache_ready = "joined" in _SUMMARY_CACHE
+    return {"application": {"api": "Healthy", "database": "Healthy" if db_ok else "Warning",
+                            "dashboard_cache": "Warm" if cache_ready else "Cold"},
+            "data": {"artifacts": artifact_status},
+            "governance": {"access_control": "Prototype role/purpose headers (not authenticated)",
+                           "audit_chain": "Healthy" if audit_valid else "Failed",
+                           "security_boundary": "Prototype"},
+            "synthetic_demo": True}

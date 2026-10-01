@@ -3,12 +3,38 @@ from pathlib import Path
 
 from app.core.config import settings
 
+SQLITE_PREFIX = "sqlite:///"
+
+
+def resolve_sqlite_url(database_url: str) -> Path:
+    """Resolve a SQLite URL to a concrete database file path.
+
+    Relative paths are anchored to the repository root so the database
+    location does not depend on the process working directory.
+    """
+    if not database_url.startswith(SQLITE_PREFIX):
+        raise ValueError("FORTIFY prototype database must use SQLite (sqlite:/// URL).")
+    raw = database_url.removeprefix(SQLITE_PREFIX)
+    path = Path(raw)
+    if not path.is_absolute():
+        from app.core.paths import ROOT
+
+        path = ROOT / path
+    return path
+
 
 def _sqlite_path() -> Path:
-    prefix = "sqlite:///"
-    if not settings.database_url.startswith(prefix):
-        raise ValueError("Phase 0 prototype database must use SQLite.")
-    return Path(settings.database_url.removeprefix(prefix))
+    return resolve_sqlite_url(settings.database_url)
+
+
+def check_database() -> bool:
+    """Return True when the configured database accepts a real query."""
+    try:
+        with sqlite3.connect(_sqlite_path(), timeout=10.0) as connection:
+            connection.execute("SELECT 1")
+        return True
+    except sqlite3.Error:
+        return False
 
 
 def initialize_database() -> None:

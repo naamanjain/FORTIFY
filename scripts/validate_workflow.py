@@ -11,8 +11,22 @@ for path in (ROOT, BACKEND):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
+from app.core.paths import AUDIT_PATH
 from app.security.audit import AuditLog
 from app.services.workflow import ALLOWED_ACTIONS, WORKFLOW_STATES, _db_path, ensure_workflow_items
+
+
+def _count_outside_vocabulary(conn: sqlite3.Connection, column: str, vocabulary: set) -> int:
+    """Count rows whose column value is not in the allowed vocabulary.
+
+    Placeholders are generated from the vocabulary length so the query cannot
+    drift out of sync when a state or action is added.
+    """
+    values = tuple(sorted(vocabulary))
+    placeholders = ", ".join("?" for _ in values)
+    return conn.execute(
+        f"SELECT COUNT(*) FROM workflow_items WHERE {column} NOT IN ({placeholders})", values
+    ).fetchone()[0]
 
 
 def main() -> int:
@@ -28,11 +42,11 @@ def main() -> int:
         workflow_count = conn.execute("SELECT COUNT(*) FROM workflow_items").fetchone()[0]
         unique_people = conn.execute("SELECT COUNT(DISTINCT person_id) FROM workflow_items").fetchone()[0]
         duplicate = conn.execute("SELECT COUNT(*) FROM (SELECT person_id, recommendation_date, COUNT(*) c FROM workflow_items GROUP BY person_id, recommendation_date HAVING c > 1)").fetchone()[0]
-        invalid_state = conn.execute("SELECT COUNT(*) FROM workflow_items WHERE workflow_state NOT IN (?, ?, ?, ?, ?, ?, ?)", tuple(sorted(WORKFLOW_STATES))).fetchone()[0]
-        invalid_action = conn.execute("SELECT COUNT(*) FROM workflow_items WHERE recommended_action NOT IN (?, ?, ?, ?, ?, ?, ?)", tuple(sorted(ALLOWED_ACTIONS))).fetchone()[0]
+        invalid_state = _count_outside_vocabulary(conn, "workflow_state", set(WORKFLOW_STATES))
+        invalid_action = _count_outside_vocabulary(conn, "recommended_action", set(ALLOWED_ACTIONS))
         raw_wellness_columns = [r[1] for r in conn.execute("PRAGMA table_info(workflow_items)") if any(x in r[1].lower() for x in ["mood", "energy", "sleep_quality", "perceived_stress", "support_request"])]
         audit_count = conn.execute("SELECT COUNT(*) FROM workflow_audit_events").fetchone()[0]
-    audit = AuditLog(ROOT / "artifacts" / "phase8" / "dashboard_audit.jsonl")
+    audit = AuditLog(AUDIT_PATH)
     if duplicate or invalid_state or invalid_action or raw_wellness_columns:
         raise SystemExit("VALIDATION FAILED")
     if not audit.verify_chain():

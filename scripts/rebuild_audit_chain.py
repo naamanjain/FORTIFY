@@ -66,11 +66,16 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Rebuild a FORTIFY audit log through the AuditLog writer")
     parser.add_argument(
         "--path",
-        default=str(ROOT / "artifacts" / "phase8" / "dashboard_audit.jsonl"),
-        help="Audit JSONL path to rebuild",
+        default=None,
+        help="Audit JSONL path to rebuild (defaults to the configured FORTIFY audit log)",
     )
     args = parser.parse_args()
-    path = Path(args.path)
+    if args.path:
+        path = Path(args.path)
+    else:
+        from app.core.paths import AUDIT_PATH
+
+        path = AUDIT_PATH
     if not path.exists():
         raise SystemExit(f"Audit log not found: {path}")
     count = rebuild(path)

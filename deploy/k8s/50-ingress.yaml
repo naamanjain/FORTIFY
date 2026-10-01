@@ -1,0 +1,39 @@
+# Optional ingress-nginx route. Adjust the host and TLS secret for your
+# environment; the prototype itself remains unauthenticated (trusted-network
+# deployment only, see SECURITY_MODEL.md).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: fortify
+  namespace: fortify
+  labels:
+    app.kubernetes.io/part-of: fortify
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: fortify.example.local
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: fortify-backend
+                port:
+                  number: 8000
+          - path: /health
+            pathType: Prefix
+            backend:
+              service:
+                name: fortify-backend
+                port:
+                  number: 8000
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: fortify-frontend
+                port:
+                  number: 80

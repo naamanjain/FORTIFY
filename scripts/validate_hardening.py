@@ -15,6 +15,9 @@ for path in (ROOT, BACKEND):
 import pandas as pd
 from fastapi.testclient import TestClient
 
+from app.core.config import settings
+from app.core.database import resolve_sqlite_url
+from app.core.paths import AUDIT_PATH
 from app.main import app
 from app.security.audit import AuditLog
 from app.services.workflow import initialize_workflow_store
@@ -71,11 +74,10 @@ def main() -> int:
     # Apply idempotent workflow schema/index hardening before validating it.
     initialize_workflow_store()
 
-    audit_path = project / "artifacts" / "phase8" / "dashboard_audit.jsonl"
-    if not AuditLog(audit_path).verify_chain():
+    if not AuditLog(AUDIT_PATH).verify_chain():
         raise SystemExit("VALIDATION FAILED: audit chain")
 
-    db_path = project / "fortify.db"
+    db_path = resolve_sqlite_url(settings.database_url)
     if not db_path.exists():
         raise SystemExit("VALIDATION FAILED: prototype database missing")
     with sqlite3.connect(db_path) as conn:

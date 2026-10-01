@@ -81,7 +81,7 @@ def main() -> int:
     )
     selection = select_operating_threshold(
         threshold_table,
-        minimum_validation_recall=decision_config.minimum_validation_recall,
+        minimum_validation_precision=decision_config.minimum_validation_precision,
     )
 
     validation_calibration = calibration_diagnostics(valid["target"], valid_calibrated, decision_config.calibration_bins)
@@ -133,7 +133,7 @@ def main() -> int:
             "validation_operating_point": validation_operating,
             "test_operating_point": test_operating,
             "test_labels_not_used_for_selection": True,
-            "rationale": "Early-warning operation prioritizes sensitivity while retaining a validation-supported precision/F1 trade-off. The prior 0.50 operating point had low recall and is not retained as the Phase 5 decision threshold.",
+            "rationale": "Triage operation: among validation thresholds meeting the precision floor, pick the highest F1 so the review queue prioritizes instead of flagging most of the population. The floor is prototype tuning and requires real-world policy review before operational use.",
         },
         "risk_bands": {
             "LOW": f"probability < {decision_config.low_band_upper}",
@@ -147,6 +147,10 @@ def main() -> int:
             "test": test_calibration,
             "test_not_used_for_calibration": True,
         },
+        "baseline_comparison": {
+            "note": "Transparent comparators evaluated in Phase 4 (see model_metadata.json). On this synthetic dataset a simple operational load rule is competitive with the model at the operating point; the model's added value over the rule is not demonstrated on synthetic data.",
+            "test": metadata.get("baseline_comparison", {}).get("test"),
+        },
         "safety_privacy": {
             "raw_wellness_values_in_prediction_output": False,
             "medical_diagnosis": False,
@@ -156,6 +160,8 @@ def main() -> int:
         },
         "limitations": [
             "The target is a synthetic voluntary self-report observation and is not clinical ground truth.",
+            "Synthetic-label circularity: simulated stress is generated from the same duty/rest/training/incident variables the model observes, so these metrics measure reconstruction of the generator's logic, not real-world predictive value.",
+            "The temporal evaluation split shares all personnel between train and test; the person-disjoint diagnostic in the Phase 4 metadata is the more conservative view for deployment on unseen personnel.",
             "Many person-days are excluded from supervised evaluation because no future voluntary wellness observation exists in the target horizon.",
             "Thresholds are prototype operating conventions selected from validation data and require real-world policy review before operational use.",
             "Calibration is assessed on temporally held-out data but has not been externally validated.",

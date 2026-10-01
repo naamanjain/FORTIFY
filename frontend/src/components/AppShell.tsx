@@ -14,10 +14,10 @@ const purposeLabel: Record<string, string> = {
   WELFARE_SUPPORT: 'Welfare Support', AGGREGATE_OPERATIONS: 'Aggregate Operations', AUDIT: 'Audit', INFRASTRUCTURE_ADMIN: 'Infrastructure Admin',
 }
 
-export function AppShell({ navItems, activePath, query, searchResults, searchOpen, onQueryChange, onSearchSelect, onNavigate, notificationsOpen, onToggleNotifications, children, searchEnabled = true }: {
+export function AppShell({ navItems, activePath, query, searchResults, searchOpen, onQueryChange, onSearchSelect, onNavigate, children, searchEnabled = true }: {
   navItems: NavItem[]; activePath: string; query: string; searchResults: SearchResult[]; searchOpen: boolean;
   onQueryChange: (value: string) => void; onSearchSelect: (result: SearchResult) => void; onNavigate: (path: string) => void;
-  notificationsOpen: boolean; onToggleNotifications: () => void; children?: ReactNode; searchEnabled?: boolean
+  notificationsOpen?: boolean; onToggleNotifications?: () => void; children?: ReactNode; searchEnabled?: boolean
 }) {
   const role = roleLabel[FORTIFY_ROLE] ?? FORTIFY_ROLE
   const purpose = purposeLabel[FORTIFY_PURPOSE] ?? FORTIFY_PURPOSE
@@ -69,11 +69,7 @@ export function AppShell({ navItems, activePath, query, searchResults, searchOpe
         <GlobalSearch value={effectiveQuery} results={effectiveResults} open={effectiveOpen} onChange={handleQuery} onSelect={handleSelect} />
         <div className="topbar-actions">
           <div className="purpose-compact"><span>{role}</span><strong>{purpose}</strong></div>
-          <div className="notification-wrap"><button className="top-icon" type="button" onClick={onToggleNotifications} aria-label="Notifications" aria-expanded={notificationsOpen}><Icon name="bell" size={18} /><i /></button>
-            {notificationsOpen && <div className="notification-popover"><strong>No new notifications</strong><span>Operational alerts appear here when available.</span></div>}
-          </div>
-          <button className="top-icon" type="button" aria-label="Help"><Icon name="help" size={18} /></button>
-          <button className="user-menu" type="button" aria-label={`${role} profile`}><span className="user-avatar">{role.split(' ').map(x => x[0]).slice(0,2).join('')}</span><span className="user-menu-text"><strong>{role}</strong><small>Authorized workspace</small></span></button>
+          <div className="user-menu"><span className="user-avatar">{role.split(' ').map(x => x[0]).slice(0,2).join('')}</span><span className="user-menu-text"><strong>{role}</strong><small>{purpose}</small></span></div>
         </div>
       </header>
       <main className="page-content">{children}</main>

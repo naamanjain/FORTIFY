@@ -14,20 +14,17 @@ The development sequence is locked.
 - Phase 9 — Dashboard integration **(completed)**
 - Phase 10 — End-to-end demonstration **(completed)**
 - Phase 11 — Testing + hardening **(completed)**
-- Phase 12 — Final demonstration preparation **(not started)**
+- Phase 12 — Final demonstration preparation **(completed)**
+- Phase 13 — Operational product experience **(completed)**
+- Phase 13.2 — Stitch product experience **(completed)**
 
-**Current phase: Phase 11 — Testing + hardening (complete)**
-**Next phase: Phase 12 — Final demonstration preparation**
-
-Do not skip ahead.
+**Roadmap status: COMPLETE through Phase 13.2. No further phases planned.**
 
 ## Phase 12 — Final Demonstration Preparation
 
 **STATUS: COMPLETE**
 
 Phase 12 prepared a deterministic synthetic hero case, a 22-day demonstration timeline, a machine-readable demo manifest, and a readiness report. It does not alter prior-phase artifacts or workflow state.
-
-**Roadmap status: COMPLETE through Phase 12.**
 
 ## Phase 13 — Operational Product Experience
 **STATUS: COMPLETE**

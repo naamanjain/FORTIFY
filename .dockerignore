@@ -1,0 +1,27 @@
+# Keep the backend image build context lean (build from repository root).
+.git
+.venv
+**/__pycache__
+**/*.pyc
+.pytest_cache
+
+# Never bake generated data, runtime state, or models into the image —
+# they are produced by scripts/build_all.py and mounted as volumes.
+data/generated/*
+data/runtime/
+artifacts/*
+*.db
+*.log
+
+# The frontend has its own build context (frontend/Dockerfile).
+frontend
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Docs / CI not needed inside the image
+docs
+deploy
+.github

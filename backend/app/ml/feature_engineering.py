@@ -62,19 +62,6 @@ class FeatureEngineer:
         self.validate_inputs()
 
     def _prepare(self) -> None:
-        for key in (
-            "personnel",
-            "units",
-            "duty_events",
-            "recovery_events",
-            "leave_events",
-            "deployment_events",
-            "training_events",
-            "incident_events",
-            "wellness_events",
-        ):
-            if key not in self.data:
-                continue
         p = self.data["personnel"].copy()
         p["joining_date"] = pd.to_datetime(p["joining_date"], errors="raise")
         p["current_posting_start"] = pd.to_datetime(p["current_posting_start"], errors="raise")
@@ -398,7 +385,7 @@ class FeatureEngineer:
         x = x.merge(w[["person_id", "date", *score_cols, "support_request"]], on=["person_id", "date"], how="left")
         g = x.groupby("person_id", group_keys=False)
         for c, stem in [("mood_score", "mood"), ("energy_score", "energy"), ("sleep_quality", "sleep_quality"), ("perceived_stress", "perceived_stress"), ("workload_manageability", "workload_manageability")]:
-            x[f"{stem}_latest"] = c if False else x[c]
+            x[f"{stem}_latest"] = x[c]
             for d in (7, 30):
                 x[f"{stem}_{d}d_mean"] = g[c].transform(lambda s, days=d: s.rolling(days, min_periods=1).mean())
             if stem in ("mood", "sleep_quality", "perceived_stress"):

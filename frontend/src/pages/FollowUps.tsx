@@ -8,7 +8,7 @@ import type { FollowUpRecord } from '../types/workflow'
 
 const nav=[
  {id:'attention',label:'Attention',path:'/attention',icon:'alert' as const},
- {id:'personnel',label:'Personnel',path:'/personnel',icon:'person' as const},
+ {id:'personnel',label:'Personnel',path:'/personnel',icon:'person' as const},{id:'followups',label:'Follow-ups',path:'/follow-ups',icon:'calendar' as const},
  {id:'units',label:'Units',path:'/units',icon:'units' as const},
  {id:'trends',label:'Trends',path:'/trends',icon:'trend' as const},
  {id:'data',label:'Data & Signals',path:'/data/signals',icon:'data' as const},
@@ -29,7 +29,7 @@ export default function FollowUps(){
  if(loading)return <AppShell navItems={nav} activePath="/follow-ups" query="" searchResults={[]} searchOpen={false} onQueryChange={()=>{}} onSearchSelect={()=>{}} onNavigate={push} notificationsOpen={notificationsOpen} onToggleNotifications={()=>setNotificationsOpen(v=>!v)}><LoadingSkeleton/></AppShell>
  return <AppShell navItems={nav} activePath="/follow-ups" query="" searchResults={[]} searchOpen={false} onQueryChange={()=>{}} onSearchSelect={()=>{}} onNavigate={push} notificationsOpen={notificationsOpen} onToggleNotifications={()=>setNotificationsOpen(v=>!v)}>
   <PageChrome eyebrow="ATTENTION / FOLLOW-UPS" title="Follow-up schedule" subtitle="Who needs another check-in, when, and why?">
-   <div className="followup-filters" role="tablist" aria-label="Follow-up status filter">
+   <div className="followup-filters" aria-label="Follow-up status filter">
     {(['DUE_TODAY','THIS_WEEK','OVERDUE','UPCOMING','COMPLETED','ALL'] as const).map(x=><button key={x} type="button" className={status===x?'filter-chip active':'filter-chip'} onClick={()=>setStatus(x)}>{x==='DUE_TODAY'?'Due today':x==='THIS_WEEK'?'This week':x==='OVERDUE'?'Overdue':x==='UPCOMING'?'Upcoming':x==='COMPLETED'?'Completed':'All'}</button>)}
    </div>
    {error?<ErrorState message={error} onRetry={()=>void load()}/>:visible.length?<div className="data-table-wrap followup-table-wrap"><table className="data-table followup-table"><thead><tr><th>PERSON</th><th>FOLLOW-UP</th><th>LAST SUPPORT</th><th>SUPPORT TYPE</th><th>STATUS</th><th>ACTION</th></tr></thead><tbody>{visible.map(item=>{

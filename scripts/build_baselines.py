@@ -18,7 +18,7 @@ from backend.app.ml.baseline_config import BaselineConfig
 def main() -> None:
     parser = argparse.ArgumentParser(description="Build Phase 3 contextual baselines")
     parser.add_argument("--input", default="data/generated/person_day_features.csv")
-    parser.add_argument("--output", default="data/generated/person_day_features.csv")
+    parser.add_argument("--output", default="data/generated/person_day_features_baseline.csv")
     parser.add_argument("--minimum-personal-history", type=int, default=14)
     parser.add_argument("--minimum-cohort-size", type=int, default=10)
     parser.add_argument("--minimum-operational-size", type=int, default=10)

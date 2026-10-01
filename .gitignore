@@ -1,18 +1,69 @@
-﻿# Python
+# ── Python ────────────────────────────────────────────────────────────────────
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
 .venv/
+venv/
+env/
+.python-version
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+*.egg-info/
+build/
+*.so
 
-# Generated FORTIFY datasets
-data/generated/
-
-# Local databases
-*.db
-
-# Node
+# ── Node / frontend ──────────────────────────────────────────────────────────
 node_modules/
+frontend/dist/
+dist/
+.vite/
+*.tsbuildinfo
+npm-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
 
-# Environment files
+# ── Regenerated FORTIFY data and artifacts ───────────────────────────────────
+# Everything below is reproducible from source with `python scripts/build_all.py`
+# (~300 MB of generated CSVs, trained models, and demo packages). Only the
+# .gitkeep placeholders and the documentation files are tracked.
+data/generated/*
+!data/generated/.gitkeep
+!data/generated/README.md
+!data/generated/FEATURE_CATALOG.md
+artifacts/*
+!artifacts/.gitkeep
+
+# ── Runtime state (SQLite workflow database, audit log) — never commit ────────
+data/runtime/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# ── Local configuration and secrets ──────────────────────────────────────────
 .env
 .env.*
 !.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.keystore
+
+# ── Logs, temporary files, OS/editor noise ───────────────────────────────────
+*.log
+*.tmp
+*.bak
+*.swp
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.screenshot/

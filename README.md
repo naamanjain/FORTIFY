@@ -2,295 +2,445 @@
 
 **Force Operational Resilience & Timely Intervention Framework**
 
-SIH Problem Statement: **26186**  
-Title: **AI-Based Predictive Personnel Stress and Welfare Monitoring System for Uniformed Forces**  
-Organization: **Ministry of Home Affairs — CRPF, Police II Division**  
-Category: **Software**  
-Domain: **MedTech / BioTech / HealthTech**
-
-## Current phase
-
-**Phase 4 — Predictive Risk Modeling (complete)**
-
-Phase 0 established the React/Vite/TypeScript frontend, Python/FastAPI backend, SQLite prototype, health endpoint, and locked architecture. Phase 1 now supplies a deterministic synthetic longitudinal operational world for later analytical phases.
-
-## Phase 1 data generation
-
-Default dataset:
-
-```bash
-python scripts/generate_synthetic_data.py --personnel 500 --days 180 --seed 42 --output data/generated
-```
-
-Custom example:
-
-```bash
-python scripts/generate_synthetic_data.py \
-  --personnel 500 \
-  --days 180 \
-  --seed 42 \
-  --output data/generated
-```
-
-Optional parameters also include `--start-date` and `--wellness-coverage`.
-
-## Validate generated data
-
-```bash
-python scripts/validate_synthetic_data.py \
-  --output data/generated \
-  --personnel 500 \
-  --days 180
-```
-
-The validator checks file presence, unique IDs, valid foreign keys, temporal ordering, duration bounds, categorical values, personnel coverage, night duty representation, event variety, sparse wellness coverage, and prohibited clinical/scenario fields.
-
-## Phase 1 outputs
-
-Generated under `data/generated/`:
-
-- `personnel.csv`
-- `units.csv`
-- `deployment_events.csv`
-- `duty_events.csv`
-- `recovery_events.csv`
-- `leave_events.csv`
-- `training_events.csv`
-- `incident_events.csv`
-- `wellness_events.csv`
-- `README.md`
-
-Formal schemas are under `data/schemas/`.
-
-## Run tests
-
-From the repository root:
-
-```bash
-PYTHONPATH=. pytest -q backend/tests/test_health.py backend/tests/test_phase1_data.py
-```
-
-The full backend test suite can also be run from `backend/` with the Phase 0 test environment configured.
-
-## Backend
-
-```bash
-cd backend
-python -m venv .venv
-# Windows: .venv\\Scripts\\activate
-# macOS/Linux: source .venv/bin/activate
-pip install -r requirements.txt
-uvicorn app.main:app --reload --port 8000
-```
-
-## Frontend
-
-```bash
-cd frontend
-npm install
-npm run dev
-```
-
-## Phase boundaries
-
-Phase 4 now implements the first predictive risk-modeling layer only. Phase 5 explainability/uncertainty, intervention simulation, optimization, advanced dashboard behavior, production authentication, and TEE remain deferred.
-
-All generated data is synthetic, is not real government data, and is not clinically validated.
-
-## Phase 2 — Feature Engineering
-
-Build time-aware person-day features from the existing Phase 1 CSV world:
-
-```bash
-python scripts/build_features.py --input data/generated --output data/generated
-```
-
-Validate the resulting feature table:
-
-```bash
-python scripts/validate_features.py --input data/generated/person_day_features.csv --personnel 500 --days 180
-```
-
-Feature metadata: `data/schemas/feature_schema.json` and `data/generated/FEATURE_CATALOG.md`.
-
-Phase 2 performs feature transformation only. It does not train ML models, calculate risk, forecast trajectory, establish final baselines, explain predictions, simulate interventions, optimize operations, or implement the dashboard.
-
-
-## Phase 3 — Personal + Cohort + Operational Baselines
-
-The Phase 3 baseline engine extends the person-day feature table with contextual references:
-
-```bash
-python scripts/build_baselines.py --input data/generated/person_day_features.csv --output data/generated/person_day_features.csv
-```
-
-Validate the extended table:
-
-```bash
-python scripts/validate_baselines.py --input data/generated/person_day_features.csv
-```
-
-Baseline assumptions are configurable in `backend/app/ml/baseline_config.py`. Personal history requires 14 valid prior observations by default; cohort and operational context require 10 comparison personnel. Small/insufficient contexts remain missing.
-
-Phase 3 does not train a model, calculate risk, forecast trajectory, recommend interventions, optimize operations, or implement a dashboard. Phase 4 is the next phase only after Phase 3 cross-phase integration verification passes.
-
-
-## Phase 4 — Predictive Risk Modeling
-
-Train the deterministic baseline model from the Phase 3 table:
-
-```bash
-python scripts/train_model.py --input data/generated/person_day_features_baseline.csv --output-dir artifacts/phase4 --prediction-output data/generated/risk_predictions.csv
-```
-
-Validate the generated predictive artifacts:
-
-```bash
-python scripts/validate_model.py
-```
-
-The Phase 4 target uses observed synthetic voluntary wellness in the next 7 days. Wellness-derived fields are excluded from predictive inputs. Model outputs are operational/welfare prototype signals, not clinical diagnoses or validated medical predictions.
-
-## Phase 5 — Risk Decision Layer
-Build the Phase 5 welfare decision layer from the existing Phase 4 predictions:
-
-```bash
-python scripts/build_phase5_risk_layer.py --features data/generated/person_day_features_baseline.csv --phase4-model artifacts/phase4/fortify_phase4_logistic_regression.joblib --phase4-metadata artifacts/phase4/model_metadata.json --phase4-predictions data/generated/risk_predictions.csv --output-dir artifacts/phase5 --prediction-output data/generated/risk_decisions.csv --seed 42
-```
-
-Validate the Phase 5 output:
-
-```bash
-python scripts/validate_phase5_risk_layer.py
-```
-
-The locked prototype operating threshold is selected from validation data with a recall floor; test labels are not used for threshold selection or calibration. Risk bands are LOW/MODERATE/HIGH operational welfare signals only. Raw wellness responses are not exposed in the Phase 5 decision output.
-
-
-
-## Phase 6 — Welfare Intervention / Decision Support
-Build deterministic welfare-support recommendations from the Phase 5 decision output:
-
-```bash
-python scripts/build_interventions.py --predictions data/generated/risk_decisions.csv --features data/generated/person_day_features_baseline.csv --output data/generated/intervention_recommendations.csv --report data/generated/intervention_generation_report.json
-```
-
-Validate:
-
-```bash
-python scripts/validate_interventions.py --input data/generated/intervention_recommendations.csv --report data/generated/intervention_generation_report.json
-```
-
-Phase 6 is policy-only: it maps LOW/MODERATE/HIGH signals to welfare-support action categories, generates operational rationales, requires human review where appropriate, and suppresses unchanged repeated recommendations. It does not execute interventions, send messages, optimize staffing, or make clinical/disciplinary decisions.
-
-## Phase 7 — operational feasibility
-Run from the repository root:
-
-```bash
-python scripts/build_feasibility.py
-python scripts/validate_feasibility.py --expected-rows 90000
-```
-
-Phase 7 consumes `data/generated/intervention_recommendations.csv` and existing operational event datasets. It writes `data/generated/intervention_feasibility.csv` and `data/generated/feasibility_generation_report.json`.
-
-## Phase 8 security controls
-
-Run the Phase 8 security validation from the repository root:
-
-```bash
-python scripts/validate_security.py
-```
-
-The validation checks identity pseudonymization, authenticated encryption round-trip, purpose-bound access control, audit-chain integrity, the trusted-computation boundary, and the absence of raw wellness fields from operational outputs.
-
-The prototype does not claim hardware-backed TEE or remote attestation. Those are production architecture requirements.
-
-## Phase 9 — Dashboard
-
-Run the backend and frontend independently. The dashboard reads existing Phase 5–8 artifacts through read-only FastAPI dashboard endpoints. No raw wellness/self-report fields are sent to the browser.
-
-Backend:
-```bash
-uvicorn app.main:app --reload --port 8000
-```
-
-Frontend:
-```bash
-cd frontend
-npm install
-npm run dev
-```
-
-Dashboard validation:
-```bash
-python scripts/validate_dashboard.py
-```
-
-The prototype frontend sends role/purpose headers for the existing Phase 8 authorization boundary. Production authentication remains deferred.
-
-## Phase 10 — Human-in-the-loop workflow
-The dashboard now exposes a deterministic workflow over Phase 6/7 decisions. Authorized welfare personnel can inspect pending items and record explicit state transitions such as acknowledgement, review, support planning, deferral, dismissal, and completion. Every transition is audited.
-
-The workflow does not execute interventions, send messages, or make adverse personnel decisions.
-
-Run the backend as before:
-```bash
-uvicorn app.main:app --reload --port 8000
-```
-
-The Phase 10 API is under `/api/workflow/` and uses the existing `X-Fortify-Role` / `X-Fortify-Purpose` prototype security boundary.
-
-
-
-## Phase 11 — Testing + hardening
-
-Phase 11 adds prototype hardening around the existing Phase 9 dashboard and Phase 10 workflow. It strengthens SQLite workflow persistence, serializes concurrent workflow transitions, invalidates dashboard caches when source artifacts change, and provides a root-level validation command. It does not change prediction, risk bands, intervention policy, feasibility semantics, or security roles.
-
-Run the hardening validator from the project root:
+SIH Problem Statement **26186** — *AI-Based Predictive Personnel Stress and Welfare Monitoring System
+for Uniformed Forces*, Ministry of Home Affairs — CRPF, Police II Division.
+
+> **Prototype — synthetic data only.** FORTIFY is an operational welfare **decision-support
+> prototype**. Every dataset it uses is synthetic and generated by the repository itself. It is not a
+> clinical, diagnostic, or disciplinary system, and it has no real-world validation. See
+> [Limitations](#limitations) before drawing any conclusion from its output.
+
+FORTIFY turns a longitudinal stream of operational records — deployments, duties, recovery, leave,
+training, incidents — plus **sparse, voluntary** wellness self-reports into a reviewable welfare
+signal for authorized human staff. It produces a calibrated risk signal, explains which *operational*
+factors accompany it, proposes a welfare-support action, checks whether that action is operationally
+feasible, and records every human decision in a tamper-evident audit chain.
+
+It never diagnoses, never scores performance, and never takes an adverse action on a person.
+
+---
+
+## Table of contents
+
+- [What it does](#what-it-does)
+- [Architecture](#architecture)
+- [Repository structure](#repository-structure)
+- [Prerequisites](#prerequisites)
+- [Quick start](#quick-start)
+- [Environment variables](#environment-variables)
+- [Data and model generation](#data-and-model-generation)
+- [Running with Docker](#running-with-docker)
+- [Running on Kubernetes](#running-on-kubernetes)
+- [Tests and validators](#tests-and-validators)
+- [Continuous integration](#continuous-integration)
+- [Security model](#security-model)
+- [Roles and purposes](#roles-and-purposes)
+- [Limitations](#limitations)
+- [What production would require](#what-production-would-require)
+- [Troubleshooting](#troubleshooting)
+- [Documentation](#documentation)
+- [License](#license)
+
+---
+
+## What it does
+
+The pipeline is a single deterministic chain. Each stage consumes the previous stage's output and
+adds exactly one capability.
+
+| Stage | Output | What it contributes |
+|---|---|---|
+| Synthetic world | `duty_events`, `recovery_events`, `leave_events`, `deployment_events`, `training_events`, `incident_events`, `wellness_events`, `personnel`, `units` | A deterministic 500-personnel, 180-day longitudinal world (seed 42) |
+| Features | `person_day_features.csv` | Time-safe per-person-day operational features |
+| Baselines | `person_day_features_baseline.csv` | Personal / cohort / operational reference context with sufficiency guards |
+| Model | `risk_predictions.csv`, `artifacts/phase4/` | Logistic-regression probability of elevated future voluntary stress self-report |
+| Risk decisions | `risk_decisions.csv`, `artifacts/phase5/` | Platt calibration, a locked operating threshold, LOW/MODERATE/HIGH band, contributing operational signals |
+| Interventions | `intervention_recommendations.csv` | Deterministic welfare-support action mapping with rationales |
+| Feasibility | `intervention_feasibility.csv` | Operational constraint flags (duty conflict, workload, unit pressure) |
+| Demo package | `artifacts/phase12/` | A reproducible hero case + timeline for demonstration |
+
+The API then serves read-only, purpose-authorized views over those artifacts, plus a
+human-in-the-loop workflow that records every decision in a SHA-256 hash-chained audit log.
+
+**Vocabulary.** Phase 4 emits `risk_level` (`LOW`/`MODERATE`/`ELEVATED`, fixed display bands).
+Phase 5 onward emits the calibrated `risk_band` (`LOW`/`MODERATE`/`HIGH`) at the
+validation-selected operating threshold. Both are operational welfare signals — not stress labels,
+not medical states. In the UI you will see *Signal, Trend, Baseline, Change, Contributing Factors,
+Review, Support, Feasibility, Follow-up, Outcome, Audit*.
+
+---
+
+## Architecture
 
 ```text
-python scripts/validate_hardening.py
+┌───────────────────────┐        same-origin /api        ┌──────────────────────────┐
+│  React 19 + Vite + TS │ ─────────────────────────────▶ │  FastAPI (backend/)      │
+│  (frontend/)          │   X-Fortify-Role / -Purpose    │  • dashboard (read-only) │
+│  nginx in production  │                                 │  • workflow (audited)    │
+└───────────────────────┘                                 │  • rbac / crypto / audit │
+                                                        └────────────┬─────────────┘
+                                                                     │
+                                        ┌────────────────────────────┴─────────────┐
+                                        │ generated CSVs (data/generated/)        │
+                                        │ SQLite workflow DB + audit log (runtime) │
+                                        └──────────────────────────────────────────┘
 ```
 
-The prototype remains synthetic and is not a clinical, disciplinary, or production security system.
+The offline pipeline is separate from request serving:
 
-## Phase 12 — Final Demonstration Preparation
+```text
+scripts/build_all.py
+  generate_synthetic_data → build_features → build_baselines → train_model
+  → build_phase5_risk_layer → build_interventions → build_feasibility → prepare_demo
+```
 
-Prepare the deterministic synthetic demonstration package:
+ML never imports presentation code, and the API never trains or mutates models.
+
+---
+
+## Repository structure
+
+```text
+FORTIFY/
+├── README.md, ARCHITECTURE.md, MODEL_SPEC.md, DATA_SPEC.md, SECURITY_MODEL.md, …
+├── LICENSE                        # MIT
+├── conftest.py                    # wires the repo root + backend/ onto sys.path for pytest
+├── docker-compose.yml
+├── .github/workflows/ci.yml
+├── deploy/k8s/                    # reference Kubernetes manifests
+├── backend/
+│   ├── app/
+│   │   ├── api/routes/            # dashboard + workflow routers
+│   │   ├── core/                  # config, DB init, repo path resolution
+│   │   ├── ml/                    # features, baselines, model, decisions, policy, feasibility
+│   │   ├── security/              # rbac, crypto, tokenization, audit chain, trust boundary
+│   │   └── services/              # workflow state machine + persistence
+│   └── tests/                     # 103 tests
+├── frontend/                      # React + Vite + TypeScript
+├── data/
+│   ├── schemas/                   # formal JSON schemas (tracked)
+│   ├── generated/                 # generated — NOT tracked, rebuild with build_all.py
+│   └── runtime/                   # SQLite DB + audit log — never tracked
+├── artifacts/                     # models, reports, demo package — NOT tracked
+└── scripts/                       # pipeline, validators, verification scripts
+```
+
+**Generated data, models, and `frontend/dist/` are intentionally not in version control.** They are
+~375 MB of reproducible output. A fresh clone rebuilds them with one command (see below).
+
+---
+
+## Prerequisites
+
+| Tool | Version | Notes |
+|---|---|---|
+| Python | 3.13 (3.11+ works) | Dependencies are pinned in `backend/requirements.txt` |
+| Node.js | 24 (20+ works) | For the frontend |
+| Docker | Optional | Docker Desktop / Engine with Compose v2 |
+
+No database server, message broker, or external service is required. The prototype uses SQLite and
+generated files.
+
+---
+
+## Quick start
 
 ```bash
+# 1. Backend dependencies (pinned)
+pip install -r backend/requirements.txt
+
+# 2. Generate the demo environment — REQUIRED on a fresh clone (~7 minutes, ~375 MB)
+#    Without it the API still starts, but data endpoints return HTTP 503.
+python scripts/build_all.py
+
+# 3. Start the API
+uvicorn app.main:app --app-dir backend --port 8000
+
+# 4. Start the frontend (in a second terminal)
+cd frontend
+npm install
+npm run dev
+```
+
+Then open **http://localhost:5173**. The Vite dev server proxies `/api` and `/health` to port 8000,
+so the browser makes same-origin requests and no CORS configuration is needed.
+
+Verify the whole thing:
+
+```bash
+curl http://localhost:8000/health
+# {"status":"ok","service":"FORTIFY"}
+```
+
+---
+
+## Environment variables
+
+All variables are optional — the defaults work for local development. Copy
+`backend/.env.example` to `backend/.env` (or export them) to override.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `FORTIFY_DATABASE_URL` | `sqlite:///./backend/fortify.db` | SQLite location. Relative paths resolve against the repo root, not the CWD. |
+| `FORTIFY_CORS_ORIGINS` | `http://localhost:5173` | Comma-separated allowed browser origins. |
+| `FORTIFY_DATA_DIR` | `<repo>/data/generated` | Where generated CSVs are read from. |
+| `FORTIFY_RUNTIME_DIR` | `<repo>/data/runtime` | Runtime state directory (DB, audit log). |
+| `FORTIFY_AUDIT_LOG` | `<repo>/data/runtime/audit.jsonl` | Hash-chained audit log path. |
+| `VITE_FORTIFY_ROLE` | `WELFARE_OFFICER` | Frontend: role sent as `X-Fortify-Role`. |
+| `VITE_FORTIFY_PURPOSE` | `WELFARE_SUPPORT` | Frontend: purpose sent as `X-Fortify-Purpose`. |
+| `VITE_API_BASE_URL` | *(empty)* | Frontend: API origin. Empty = same-origin via proxy. |
+
+> **These headers are not authentication.** The backend trusts whatever role/purpose the caller
+> sends. This is a deliberate prototype simplification, documented in
+> [SECURITY_MODEL.md](SECURITY_MODEL.md), and it is why this must not be exposed to untrusted
+> networks.
+
+---
+
+## Data and model generation
+
+```bash
+python scripts/build_all.py          # full deterministic pipeline (seed 42)
+```
+
+Equivalent individual steps, in order:
+
+```bash
+python scripts/generate_synthetic_data.py   --personnel 500 --days 180 --seed 42 --output data/generated
+python scripts/build_features.py            --input data/generated --output data/generated
+python scripts/build_baselines.py           --input data/generated/person_day_features.csv --output data/generated/person_day_features_baseline.csv
+python scripts/train_model.py               --input data/generated/person_day_features_baseline.csv --output-dir artifacts/phase4 --prediction-output data/generated/risk_predictions.csv
+python scripts/build_phase5_risk_layer.py   --features data/generated/person_day_features_baseline.csv --phase4-model artifacts/phase4/fortify_phase4_logistic_regression.joblib --phase4-metadata artifacts/phase4/model_metadata.json --phase4-predictions data/generated/risk_predictions.csv --output-dir artifacts/phase5 --prediction-output data/generated/risk_decisions.csv --seed 42
+python scripts/build_interventions.py       --predictions data/generated/risk_decisions.csv --features data/generated/person_day_features_baseline.csv --output data/generated/intervention_recommendations.csv --report data/generated/intervention_generation_report.json
+python scripts/build_feasibility.py
 python scripts/prepare_demo.py
 ```
 
-Validate it:
+Every step is seeded and deterministic. On identical dependency versions the outputs are
+byte-for-byte reproducible, which is what makes the CI reproducibility job meaningful.
+
+**Regenerating changes nothing in version control** — outputs are git-ignored by design.
+
+---
+
+## Running with Docker
 
 ```bash
+docker compose up --build
+```
+
+This starts three services:
+
+| Service | Port | Role |
+|---|---|---|
+| `pipeline` | — | Regenerates the demo environment into named volumes, then exits 0 |
+| `fortify-backend` | 8000 | FastAPI |
+| `fortify-frontend` | 5173 | nginx serving the SPA and proxying `/api` + `/health` |
+
+Open **http://localhost:5173**. Both images run as an unprivileged user (`uid 10001`) and write only
+to mounted volumes; no generated data is baked into either image.
+
+```bash
+docker compose down -v      # stop and remove volumes
+```
+
+Individual builds:
+
+```bash
+docker build -f backend/Dockerfile -t fortify-backend:latest .   # context is the repo root
+docker build -t fortify-frontend:latest frontend/                # context is frontend/
+```
+
+---
+
+## Running on Kubernetes
+
+Reference manifests live in [`deploy/k8s/`](deploy/k8s/README.md): namespace, ConfigMap, PVC,
+a **suspended** pipeline Job, backend/frontend Deployments + Services, and an optional Ingress.
+
+```bash
+docker build -f backend/Dockerfile -t fortify-backend:latest .
+docker build -t fortify-frontend:latest frontend/
+# kind:    kind load docker-image fortify-backend:latest fortify-frontend:latest
+# minikube: minikube image load fortify-backend:latest fortify-frontend:latest
+
+kubectl apply -f deploy/k8s/
+kubectl -n fortify patch job fortify-pipeline -p '{"spec":{"suspend":false}}'
+kubectl -n fortify wait --for=condition=complete job/fortify-pipeline --timeout=30m
+kubectl -n fortify port-forward svc/fortify-frontend 8080:80
+```
+
+The Job is created suspended on purpose so `kubectl apply` does not immediately start a long
+computation. These are demonstration-grade manifests: single replica, SQLite on a `ReadWriteOnce`
+volume, no autoscaling, no TLS by default, and no authentication.
+
+---
+
+## Tests and validators
+
+```bash
+pytest -q                                   # 103 backend tests
+cd frontend && npm run build                # TypeScript check + production build
+```
+
+The suite is self-contained (it builds its own fixtures in `tmp_path`), but 30 integration tests read
+the generated artifacts — so run `python scripts/build_all.py` at least once in the working
+directory before the first `pytest`.
+
+Phase validators, run after generation:
+
+```bash
+python scripts/validate_synthetic_data.py --output data/generated --personnel 500 --days 180
+python scripts/validate_features.py        --input data/generated/person_day_features.csv --personnel 500 --days 180
+python scripts/validate_baselines.py       --input data/generated/person_day_features_baseline.csv
+python scripts/validate_model.py
+python scripts/validate_phase5_risk_layer.py
+python scripts/validate_interventions.py   --input data/generated/intervention_recommendations.csv --report data/generated/intervention_generation_report.json
+python scripts/validate_feasibility.py     --expected-rows 90000
+python scripts/validate_security.py
+python scripts/validate_workflow.py
+python scripts/validate_dashboard.py
 python scripts/validate_demo.py
+python scripts/validate_hardening.py
+python scripts/validate_product_experience.py
+python scripts/validate_stitch_product.py
 ```
 
-Outputs are written under `artifacts/phase12/` and contain no raw wellness responses. The preparation step is read-only with respect to workflow state and earlier generated artifacts.
-
-## Phase 13 — Operational Product Experience
-
-Run the existing backend as normal, then start the frontend with `npm run dev` from `frontend/`.
-
-The dashboard now provides role-aware operational navigation for Attention, Follow-ups, Personnel, Units, Trends, Data & Signals, and governance views. The browser receives aggregated operational context rather than raw event/feature datasets.
-
-Validate the product layer from the repository root:
+Live-API verification (start the backend first):
 
 ```bash
-python scripts/validate_product_experience.py
-pytest -q
+python scripts/verify_acceptance.py         # scenarios A–J + security attempts
+python scripts/verify_workflow_lifecycle.py # full workflow + negative cases
 ```
 
-Individual personnel views require `WELFARE_OFFICER` + `WELFARE_SUPPORT`. Aggregate command views use `AGGREGATE_OPERATIONS`. Governance views use the existing auditor/administrator purposes. The interface is a synthetic demonstration environment and not a clinical or disciplinary system.
-## Phase 13.2 — Stitch Product Experience
+Both honor `FORTIFY_VERIFY_URL` (default `http://localhost:8000`) and exit non-zero on failure.
 
-**STATUS: COMPLETE**
+---
 
-Phase 13.2 implements the six-screen operational product experience from the supplied Stitch reference using the existing FORTIFY backend and security/workflow infrastructure. The screens are routed as Attention, dynamic Person Profile (`/person/:personId`), Units/Unit Command (`/units` and `/units/:unitId`), Data & Signals, Data Collection Management, and Governance/Security/Audit. Shared application chrome remains reusable across screens.
+## Continuous integration
 
-The Person Profile is fully data-driven and does not hard-code the Stitch hero example. Unit views remain aggregate-first and governance/data-management views respect the existing role/purpose authorization boundary. Raw wellness/self-report values are not emitted by the new UI.
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every push and pull request to
+`main`:
 
-The supplied Stitch HTML is treated as the visual and information-architecture reference; it is translated into React components rather than pasted into the application.
+1. **frontend-build** — `npm ci` → `npm run build` (includes the TypeScript check).
+2. **backend-verify** — pinned install → `scripts/build_all.py` (regenerates the seed-42
+   environment) → `pytest -q` → all 14 phase validators → uploads the regenerated reports as a
+   build artifact.
 
+CI starts from a clean checkout and never depends on local developer files.
+
+---
+
+## Security model
+
+The full design and the prototype-vs-production boundary are in
+[SECURITY_MODEL.md](SECURITY_MODEL.md). In short:
+
+- **Pseudonymization** — analytics identifiers are deterministic HMAC-SHA256 tokens; the mapping
+  secret is supplied out of band and is never committed.
+- **Authenticated encryption** — `backend/app/security/crypto.py` provides Fernet-based encryption
+  for protected fields with caller-supplied keys.
+- **Purpose-bound access control** — every endpoint requires a role *and* an access purpose; the
+  combination is checked, not the role alone.
+- **Audit chain** — append-only JSONL with a SHA-256 hash chain; tampering is detectable.
+- **Privacy boundary** — no raw wellness/self-report values are emitted to any API response or view.
+- **No production cryptography claims** — there is no TEE, attestation, or HSM in this prototype.
+
+Every dashboard read and every workflow transition is audit-recorded.
+
+## Roles and purposes
+
+| Role | Permitted purposes | Effective access |
+|---|---|---|
+| `WELFARE_OFFICER` | `WELFARE_SUPPORT` | Individual person detail, workflow |
+| `COMMANDER` | `AGGREGATE_OPERATIONS` | Aggregate unit summaries only — **not** individual records |
+| `AUDITOR` | `AUDIT` | Audit trail only — **not** welfare data |
+| `SYSTEM_ADMINISTRATOR` | `INFRASTRUCTURE_ADMIN` | System health — **not** welfare data |
+
+Aggregate-first is enforced server-side: a commander requesting an individual person record receives
+HTTP 403, and the denial itself is audit-recorded.
+
+---
+
+## Limitations
+
+These are real and deliberate; none are hidden.
+
+- **Synthetic data only.** No real government, personnel, or departmental data is used anywhere.
+- **No real-world model validation.** Reported metrics (test ROC AUC ≈ 0.76) are prototype
+  measurements on synthetic data. They are not clinical, operational, or externally validated.
+- **Sparse, voluntary target.** The supervised label depends on people voluntarily submitting a
+  wellness self-report; most person-days are unlabeled. Missing wellness is *never* treated as
+  evidence of strain.
+- **Explanations are associative, not causal.** They describe operational factors that accompany a
+  higher predicted signal — nothing more.
+- **No authentication.** The API trusts caller-supplied headers. Deploy only on a trusted network.
+- **SQLite and generated files.** Prototype persistence only; no production datastore.
+- **No hardware-backed security.** No TEE, remote attestation, HSM, or secret-management service.
+- **No intervention simulator.** Phase 6/7 provide deterministic action mapping and operational
+  feasibility — not numeric projected-strain estimates.
+- **Threshold and bands are prototype tuning** and require policy review before any real use.
+
+## What production would require
+
+Not implemented here, and deliberately not claimed: a real identity provider with federation; a
+managed secret store or HSM; confidential computing with remote attestation; PostgreSQL or an
+equivalent managed database; per-field encryption at rest with key rotation; centralized tamper-evident
+logging; field-level authorization tied to identity; rate limiting and abuse controls; and a
+formal clinical/occupational-safety review of any welfare inference.
+
+---
+
+## Troubleshooting
+
+**Frontend shows "The demonstration dataset is not available on the backend."**
+The API returns 503 because `data/generated/` is empty. Run `python scripts/build_all.py`.
+
+**`/health` works but every data endpoint 503s.** Same cause — the API is healthy, the data is not
+generated yet.
+
+**`pytest` fails with `FileNotFoundError: ... intervention_recommendations.csv`.**
+The integration tests need generated artifacts. Run `python scripts/build_all.py` first.
+
+**`uvicorn: command not found`.** Activate your virtualenv, or run
+`python -m uvicorn app.main:app --app-dir backend --port 8000`.
+
+**CORS error in the browser.** The dev frontend is proxied same-origin; if you serve the frontend
+from another host, set `FORTIFY_CORS_ORIGINS` to that origin.
+
+**Ports already in use.** Vite serves on 5173 and proxies to 8000 by default. To move the frontend,
+pass the port and update the proxy target together, e.g.
+`npm run dev -- --port 5174` plus a matching `server.proxy` target in `frontend/vite.config.ts`. If the
+backend moves, update `FORTIFY_CORS_ORIGINS` to match the new frontend origin.
+
+**A validator fails after regenerating.** Confirm the pinned dependency versions are installed
+(`pip install -r backend/requirements.txt`); unpinned versions can shift metrics enough to move a
+threshold.
+
+**Docker build fails on Windows path sharing.** Ensure the drive backing the repo is shared with the
+Docker daemon.
+
+---
+
+## Documentation
+
+| Document | Contents |
+|---|---|
+| [PROJECT_CONTEXT.md](PROJECT_CONTEXT.md) | Problem, product loop, boundaries, phase log |
+| [PRODUCT_SPEC.md](PRODUCT_SPEC.md) | Product loop, output vocabulary, safety language |
+| [MODEL_SPEC.md](MODEL_SPEC.md) | Target definition, model, calibration, thresholds, metrics |
+| [DATA_SPEC.md](DATA_SPEC.md) | Synthetic world schemas and generation rules |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | Locked stack, layers, repository layout |
+| [DECISIONS.md](DECISIONS.md) | Architecture decision records |
+| [SECURITY_MODEL.md](SECURITY_MODEL.md) | Roles, purposes, audit chain, prototype vs production |
+| [ROADMAP.md](ROADMAP.md) | Phase sequence and completion status |
+| [TODO.md](TODO.md) | Remaining limitations |
+| [DEMO_SCENARIO.md](DEMO_SCENARIO.md) | Demonstration storyline |
+| [docs/DEMO_RUNBOOK.md](docs/DEMO_RUNBOOK.md) | Demonstration operator guide |
+| [deploy/k8s/README.md](deploy/k8s/README.md) | Kubernetes deployment guide |
+| [data/generated/FEATURE_CATALOG.md](data/generated/FEATURE_CATALOG.md) | Feature definitions (generated) |
+
+## License
+
+MIT — see [LICENSE](LICENSE). All data and models in this repository are synthetic and carry no
+real-world operational meaning.
