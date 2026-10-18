@@ -1,5 +1,6 @@
 # Security Model
 
+
 ## Principles
 Privacy is an architectural requirement. Personnel identity should not unnecessarily travel through analytics components. Analytics should use tokenized/pseudonymous identifiers.
 
