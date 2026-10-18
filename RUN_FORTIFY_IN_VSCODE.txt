@@ -657,6 +657,13 @@ and /health to the backend container (host port 8000). The workflow database
 inside the containers is at /app/data/runtime/fortify.db, NOT backend/fortify.db,
 because the image tree is read-only for the runtime user.
 
+Both published ports are bound to 127.0.0.1, so the stack is reachable from this
+machine only. That is deliberate: the demo API trusts X-Fortify-Role /
+X-Fortify-Purpose headers, so anyone who can reach the port can pick their own
+role. Do not change the mapping to "8000:8000" on a shared network without an
+authenticating proxy in front; scripts/validate_hardening.py fails CI if the
+mapping stops being loopback-only.
+
 Stop and remove the stack:
 
     docker compose down

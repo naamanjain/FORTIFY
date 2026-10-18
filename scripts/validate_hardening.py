@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import ast
 import json
+import re
 import sqlite3
 import sys
 from pathlib import Path
@@ -93,6 +94,36 @@ def validate_console_encoding(project: Path) -> list[str]:
     return offenders
 
 
+PORT_MAPPING = re.compile(r'^\s*-\s*"([^"]+)"\s*$', re.MULTILINE)
+
+
+def validate_compose_binding(project: Path) -> list[str]:
+    """Published container ports must stay on loopback unless exposure is deliberate.
+
+    The demo build authenticates by asserting a role header, so reachability is
+    the security boundary. A wildcard publish in docker-compose.yml would hand
+    role selection to anyone who can route to the host while the file still says
+    not to expose the stack.
+    """
+    path = project / "docker-compose.yml"
+    if not path.is_file():
+        return [f"{path.name}: missing"]
+    mappings = [
+        match.group(1)
+        for match in PORT_MAPPING.finditer(path.read_text(encoding="utf-8"))
+        # A published port ends in the container port: "8000", "8000:8000" and
+        # "127.0.0.1:8000:8000" all qualify. Volumes end in a path, so they do not.
+        if match.group(1).rsplit(":", 1)[-1].isdigit()
+    ]
+    if not mappings:
+        return [f"{path.name}: no published port mappings found; gate would be vacuous"]
+    return [
+        f"{path.name}: published port {value!r} is not bound to 127.0.0.1"
+        for value in mappings
+        if not (value.startswith("127.0.0.1:") or value.startswith("[::1]:"))
+    ]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Validate FORTIFY Phase 11 hardening contracts")
     parser.add_argument("--root", default=str(ROOT))
@@ -149,6 +180,13 @@ def main() -> int:
             + "\n  ".join(encoding_offenders)
         )
 
+    binding_offenders = validate_compose_binding(project)
+    if binding_offenders:
+        raise SystemExit(
+            "VALIDATION FAILED: container ports exposed beyond loopback:\n  "
+            + "\n  ".join(binding_offenders)
+        )
+
     report = {
         "phase": "Phase 11 — Testing + Hardening",
         "artifacts_checked": 3,
@@ -159,6 +197,7 @@ def main() -> int:
         "privacy_schema": "PASS",
         "health_endpoint": "PASS",
         "console_encoding": "PASS",
+        "compose_loopback_only": "PASS",
         "synthetic_data": True,
     }
     print("PHASE 11 HARDENING VALIDATION PASSED")

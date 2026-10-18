@@ -11,6 +11,11 @@
 # contamination) still hold.
 name: CI
 
+# Least privilege: this workflow builds and tests only. It never needs write
+# access, and the artifact upload step uses the action's own scoped token.
+permissions:
+  contents: read
+
 on:
   push:
     branches: [main]
@@ -19,12 +24,14 @@ on:
 
 jobs:
   secret-scan:
-    name: Secret scan (current tree)
+    name: Secret scan (current tree + full history)
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
+          # Full history is required: the history scan below has to read every
+          # blob that was ever committed, including files later deleted.
           fetch-depth: 0
       - name: Scan tracked files for credential patterns
         run: |
@@ -40,6 +47,68 @@ jobs:
             exit 1
           fi
           echo "No credential patterns in tracked files."
+
+      - name: Scan every commit in history (Gitleaks)
+        run: |
+          # The step above only sees the working tree. This one reads the diff of
+          # every reachable commit, so a credential that was committed and later
+          # deleted still fails the build. --max-target-megabytes=0 stops large
+          # historical blobs being silently skipped, and the GIT_CONFIG_* vars
+          # let git read the runner-owned checkout without writing any file.
+          # The gate also proves its own coverage: a checkout that is shallow, or
+          # a scan that inspects no commits, is a broken gate rather than a clean
+          # repository, so both fail here instead of passing silently.
+          set -o pipefail
+          COMMITS=$(git rev-list --all --count)
+          echo "Commits reachable from fetched refs: $COMMITS"
+          if [ "$COMMITS" -lt 2 ]; then
+            echo "History scan cannot be trusted: the checkout holds $COMMITS commit(s)."
+            exit 1
+          fi
+          OUT="$RUNNER_TEMP/gitleaks"; mkdir -p "$OUT"
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/repo" \
+            -v "$OUT:/out" \
+            -w /repo \
+            -e GIT_CONFIG_COUNT=1 \
+            -e GIT_CONFIG_KEY_0=safe.directory \
+            -e GIT_CONFIG_VALUE_0=/repo \
+            ghcr.io/gitleaks/gitleaks:v8.30.1 --no-banner git \
+              --redact --max-target-megabytes=0 --log-opts="--all" \
+              --report-format=json --report-path=/out/report.json /repo \
+              >"$OUT/stdout.log" 2>"$OUT/stderr.log"
+          rc=$?
+          cat "$OUT/stderr.log" "$OUT/stdout.log"
+          if [ "$rc" -ne 0 ]; then
+            echo "Gitleaks found credential material in Git history (exit $rc)."
+            python3 -c "import json;[print('  leak:',f.get('ruleId'),f.get('file'),f.get('commit')) for f in json.load(open('$OUT/report.json'))]"
+            exit "$rc"
+          fi
+          # A scanner that reads nothing exits 0 and says "no leaks found" - that
+          # is not a clean repository. Three independent proofs are required:
+          # the checkout holds full history (>=2 commits, so fetch-depth can never
+          # be relaxed into a vacuous pass), Gitleaks actually walked commits, and
+          # its log contains no errors (an unreadable mount shows up here).
+          scanned=$(grep -oE '[0-9]+ commits scanned' "$OUT/stderr.log" | grep -oE '^[0-9]+' | head -1)
+          if [ -z "$scanned" ] || [ "$scanned" -lt 1 ]; then
+            echo "History scan gate is broken: Gitleaks scanned no commits ($scanned)."
+            exit 1
+          fi
+          if grep -qE '\bERR\b' "$OUT/stderr.log"; then
+            echo "History scan logged errors; refusing to call it clean."
+            exit 1
+          fi
+          # Gitleaks writes no report file when it finds nothing, so absence is
+          # only clean when the scan itself exited 0.
+          FINDINGS=0
+          if [ -f "$OUT/report.json" ]; then
+            FINDINGS=$(python3 -c "import json,sys;print(len(json.load(open(sys.argv[1]))))" "$OUT/report.json")
+          fi
+          if [ "$FINDINGS" != "0" ]; then
+            echo "Gitleaks reported $FINDINGS finding(s) but exited 0; refusing to pass."
+            exit 1
+          fi
+          echo "History scan clean: 0 findings across $scanned/$COMMITS commits."
 
       - name: Fail if generated artifacts become tracked
         run: |

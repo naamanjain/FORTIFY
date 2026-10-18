@@ -33,6 +33,34 @@ The Phase 0 prototype does **not** claim hardware-backed confidential computing.
 
 Prototype security implementation and production security architecture must remain clearly distinguished.
 
+## Demonstration authentication (verified behaviour)
+
+The demo build authenticates with two request headers, `X-Fortify-Role` and
+`X-Fortify-Purpose`. They are **client-asserted**: the caller chooses its own
+role, and every `Principal` built this way carries `authenticated=False`.
+Verified against a live server on 2026-10-18:
+
+- no headers -> `401` on `/api/dashboard/overview`;
+- forged welfare headers -> `200`, including 50 open workflow cases;
+- forged welfare headers -> `200` on a workflow transition (state changed);
+- forged infrastructure headers on ingestion -> `404` (the endpoint is opt-in
+  behind `FORTIFY_ENABLE_INGEST=1`).
+
+In other words, the security boundary in demo mode is **reachability**, not the
+headers. Containment in this repository:
+
+- `docker-compose.yml` publishes both ports on `127.0.0.1` only, and
+  `scripts/validate_hardening.py` fails CI if a published port stops being
+  loopback-bound;
+- startup logs `demo_auth_header_trust` so an exposed instance is visible in the
+  logs;
+- `FORTIFY_AUTH_MODE=production` refuses to boot without a real OIDC IdP
+  configuration, so there is no production mode that falls back to header trust.
+
+Residual risk: an operator who deliberately republishes the demo ports to a
+non-loopback interface hands role selection to anyone who can reach them. Put an
+authenticating proxy in front, or run the OIDC production mode, before doing so.
+
 ## Phase 5 privacy/safety controls
 The Phase 5 decision output is deliberately narrower than the underlying model-data table. It contains no raw mood, energy, sleep-quality, perceived-stress, workload-manageability, or support-request values.
 

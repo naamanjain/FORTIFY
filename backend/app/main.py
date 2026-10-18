@@ -22,6 +22,7 @@ from app.core.paths import DATA_DIR
 from app.ml.data_quality import audit as audit_data_quality
 from app.ml.data_quality import summarize
 from app.observability import METRICS, build_rate_limiter, configure_logging
+from app.security.principal import AUTH_MODE_PRODUCTION
 from app.services.workflow import ensure_workflow_items, initialize_workflow_store
 
 # Single source of truth for the application version, surfaced by /health and
@@ -41,6 +42,15 @@ REQUIRED_ARTIFACTS = (
 
 @asynccontextmanager
 async def lifespan(application: FastAPI):
+    # Authentication mode is stated at every boot: in demo mode the role and
+    # purpose are supplied by the caller, so reachability - not the headers - is
+    # the security boundary. This warning makes an exposed instance visible in
+    # the logs instead of leaving it implicit in the documentation.
+    if settings.auth_mode != AUTH_MODE_PRODUCTION:
+        logger.warning(
+            "demo_auth_header_trust",
+            extra={"detail": "role/purpose are client-asserted; bind to loopback only"},
+        )
     # Startup is deliberately tolerant of broken dependencies: a deployment
     # whose database path is unwritable, or whose generated data is missing,
     # must still boot so /health answers and /ready reports the real problem.
