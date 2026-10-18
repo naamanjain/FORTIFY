@@ -13,7 +13,7 @@ for path in (ROOT, BACKEND):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
-from app.services.workflow import _db_path, _workflow_id, initialize_workflow_store  # type: ignore
+from app.services.workflow import _db_path, ensure_workflow_items  # type: ignore
 
 EXPECTED_ROWS = 90_000
 START = "2026-01-01"
@@ -37,7 +37,10 @@ def open_workflow_cases(db_path: Path) -> dict[tuple[str, str], str]:
     """Cases that exist in the workflow store AND still expect a human decision."""
     import sqlite3
     from app.services.workflow import PENDING_STATES
-    initialize_workflow_store()
+    # A fresh clone has an empty schema until the first caller materializes the
+    # alert-policy cases from review_queue.csv. Without this the lookup sees an
+    # empty store and the hero selection fails on a clean pipeline run.
+    ensure_workflow_items()
     placeholders = ",".join("?" for _ in PENDING_STATES)
     with sqlite3.connect(db_path) as conn:
         rows = conn.execute(

@@ -56,6 +56,35 @@ def test_hero_selection_refuses_a_case_no_officer_can_open():
         choose_hero(df, {})
 
 
+def test_case_lookup_materializes_a_fresh_workflow_store(tmp_path, monkeypatch):
+    """A clean pipeline must create the cases it then selects a hero from.
+
+    Regression: the lookup queried an empty schema on a fresh clone and the
+    hero selection failed before any caller had materialized review_queue.csv.
+    """
+    import app.services.workflow as workflow
+    from scripts import prepare_demo
+
+    db = tmp_path / "workflow.db"
+    monkeypatch.setattr(workflow, "_DECISION_CACHE", None)
+    monkeypatch.setattr(workflow, "_MATERIALIZED_GUARD", None)
+    monkeypatch.setattr(workflow, "_db_path", lambda: db)
+    monkeypatch.setattr(workflow, "_data_signature", lambda data_dir: (1, 2, 3))
+    monkeypatch.setattr(workflow, "_personnel_unit_map", lambda: {"P-0001": "U-1"})
+    monkeypatch.setattr(workflow, "_load_decisions", lambda: pd.DataFrame([{
+        "person_id": "P-0001", "date": "2026-06-29", "risk_band": "HIGH",
+        "recommended_action": "PRIORITY_WELFARE_REVIEW", "priority": "HIGH",
+        "rationale": "Associated operational signals support human welfare review.",
+        "requires_human_review": True, "model_version": "phase4-v1",
+        "policy_version": "phase6-v1", "feasibility_status": "FEASIBLE",
+        "constraint_flags": "", "requires_human_review_feas": True,
+        "feasibility_policy_version": "phase7-v1",
+    }]))
+
+    cases = prepare_demo.open_workflow_cases(db)
+    assert cases == {("P-0001", "2026-06-29"): "NEW"}
+
+
 def test_workflow_case_lookup_returns_only_actionable_states():
     """A closed case must never be offered as the demonstration hero.
 
