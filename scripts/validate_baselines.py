@@ -41,7 +41,7 @@ def main() -> None:
     if missing_p3:
         raise SystemExit(f"VALIDATION FAILED: missing Phase 3 outputs {missing_p3}")
     print(f"VALIDATION PASSED: {len(df):,} rows, {len(df.columns):,} columns")
-    print(f"Date range: {df['date'].min()} → {df['date'].max()}")
+    print(f"Date range: {df['date'].min()} -> {df['date'].max()}")
     print(f"Unique personnel: {df['person_id'].nunique():,}")
 
 

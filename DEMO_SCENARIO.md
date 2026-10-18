@@ -15,7 +15,25 @@ Example synthetic demonstration values such as a current projected strain of 81 
 
 ## Phase 12 implementation notes
 
-The final demonstration preparation uses a deterministic synthetic hero case selected from the existing Phase 5–7 outputs. The current prepared case is `P-0002` on `2026-02-25`, with a 22-day risk/decision timeline ending in a HIGH operational/welfare signal, a `PRIORITY_WELFARE_REVIEW` recommendation, and existing feasibility constraints.
+The final demonstration preparation selects a deterministic synthetic hero case
+from the Phase 5-7 outputs **restricted to person-days that the alert policy
+actually turned into an open workflow case**. Read the current hero from
+`artifacts/phase12/demo_manifest.json` (`hero_case.person_id`,
+`hero_case.target_date`, `hero_case.workflow_state_at_preparation`) instead of
+hardcoding it here: it changes whenever the dataset is regenerated, and it
+changes as soon as a reviewer acts on the case, because
+`workflow_state_at_preparation` is read from the workflow store.
+
+Selection criteria: a HIGH band day with `PRIORITY_WELFARE_REVIEW`,
+CONSTRAINED or FEASIBLE_WITH_ADJUSTMENT feasibility, at least two constraint
+flags, and the largest 21-day rise in model probability among the open cases.
+Ties break deterministically on person id and date.
+
+Why the restriction to open cases exists: the hero used to be chosen from the
+scoring outputs alone. On the current 500 x 180-day build that selected a
+person-day the alert policy had budget-suppressed, so no workflow case existed
+for it, the scripted step 2 below could not be performed, and the absent row
+was reported as state `NEW` - indistinguishable from a real unreviewed case.
 
 The recommended walkthrough is:
 

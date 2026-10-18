@@ -8,6 +8,10 @@ import pytest
 
 import app.services.workflow as workflow
 from app.api.routes import dashboard as dashboard_route
+from app.security.rbac import UnitScope as _UnitScope
+
+# Direct (non-HTTP) service callers must state an explicit scope.
+_SCRIPT_SCOPE = _UnitScope.script()
 
 
 def minimal_decisions() -> pd.DataFrame:
@@ -55,7 +59,8 @@ def test_concurrent_transition_allows_only_one_valid_state_change(tmp_path: Path
             results.append(workflow.transition_item(
                 workflow._workflow_id("P-0001", "2026-06-29"),
                 new_state="ACKNOWLEDGED", actor_role="WELFARE_OFFICER",
-                purpose="WELFARE_SUPPORT", reason_code="ACKNOWLEDGED_FOR_WELFARE_REVIEW"))
+                purpose="WELFARE_SUPPORT", reason_code="ACKNOWLEDGED_FOR_WELFARE_REVIEW",
+                unit_scope=_SCRIPT_SCOPE))
         except Exception as exc:  # exactly one runner should lose the valid transition race
             results.append(exc)
 
@@ -67,7 +72,8 @@ def test_concurrent_transition_allows_only_one_valid_state_change(tmp_path: Path
     assert all(not thread.is_alive() for thread in threads)
     assert sum(isinstance(result, dict) for result in results) == 1
     assert sum(isinstance(result, ValueError) for result in results) == 1
-    assert workflow.get_item(workflow._workflow_id("P-0001", "2026-06-29"))["workflow_state"] == "ACKNOWLEDGED"
+    assert workflow.get_item(workflow._workflow_id("P-0001", "2026-06-29"),
+                             unit_scope=_SCRIPT_SCOPE)["workflow_state"] == "ACKNOWLEDGED"
 
 
 def test_audit_chain_is_fail_closed_when_tampered(tmp_path: Path) -> None:

@@ -30,6 +30,8 @@ from app.core.database import connect  # noqa: E402
 from app.ml.alert_policy import AlertPolicyConfig, evaluate_alert_policy  # noqa: E402
 from app.security.audit import AuditLog  # noqa: E402
 from app.services import workflow as wf  # noqa: E402
+from app.security.rbac import UnitScope as _UnitScope
+_SCRIPT_SCOPE = _UnitScope.script()
 
 CHECKPOINTS = [20, 40, 60, 80, 95, 110, 130, 150, 170]
 
@@ -74,7 +76,8 @@ def main() -> int:
             item_id = wf._workflow_id(str(case["person_id"]), str(case["date"].date()))
             try:
                 wf.transition_item(item_id, new_state="ACKNOWLEDGED", actor_role="WELFARE_OFFICER",
-                                   purpose="WELFARE_SUPPORT", reason_code=f"SIM-DAY-{day}-ACK")
+                                   purpose="WELFARE_SUPPORT", reason_code=f"SIM-DAY-{day}-ACK",
+                                   unit_scope=_SCRIPT_SCOPE)
                 actions += 1
             except (ValueError, KeyError):
                 pass
@@ -82,19 +85,19 @@ def main() -> int:
         # Advance one acknowledged case to support completion on day 80+.
         support_done = 0
         if day >= 80:
-            pending = wf.list_items(pending_only=True, limit=50)
+            pending = wf.list_items(pending_only=True, limit=50, unit_scope=_SCRIPT_SCOPE)
             for item in pending:
                 if item["workflow_state"] in ("ACKNOWLEDGED", "IN_REVIEW"):
                     try:
                         wf.transition_item(item["workflow_item_id"], new_state="IN_REVIEW",
                                            actor_role="WELFARE_OFFICER", purpose="WELFARE_SUPPORT",
-                                           reason_code="SIM-REVIEW")
+                                           reason_code="SIM-REVIEW", unit_scope=_SCRIPT_SCOPE)
                         wf.transition_item(item["workflow_item_id"], new_state="SUPPORT_PLANNED",
                                            actor_role="WELFARE_OFFICER", purpose="WELFARE_SUPPORT",
-                                           reason_code="SIM-PLAN")
+                                           reason_code="SIM-PLAN", unit_scope=_SCRIPT_SCOPE)
                         wf.transition_item(item["workflow_item_id"], new_state="SUPPORT_COMPLETED",
                                            actor_role="WELFARE_OFFICER", purpose="WELFARE_SUPPORT",
-                                           reason_code="SIM-SUPPORT-COMPLETE")
+                                           reason_code="SIM-SUPPORT-COMPLETE", unit_scope=_SCRIPT_SCOPE)
                         support_done += 1
                         break
                     except ValueError:

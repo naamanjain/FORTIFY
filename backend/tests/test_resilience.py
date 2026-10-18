@@ -59,8 +59,8 @@ class TestArtifactsUnavailable:
         assert response.status_code == 503
         body = response.json()
         assert body["ready"] is False
-        assert body["checks"]["artifacts"] == "missing"
-        assert body["missing_artifacts"]
+        assert body["data"]["artifacts"] == "missing"
+        assert body["data"]["missing_artifacts"]
         assert "build_all.py" in body["remedy"]
 
     def test_data_endpoints_return_503_with_guidance(self, isolated_data_dir: Path) -> None:
@@ -163,7 +163,7 @@ class TestDatabaseUnavailable:
         with TestClient(app) as client:
             response = client.get("/ready")
         body = response.json()
-        assert body["checks"]["database"] == "unavailable"
+        assert body["system"]["database"] == "unavailable"
         assert body["ready"] is False
 
 

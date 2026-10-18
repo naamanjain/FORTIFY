@@ -104,6 +104,7 @@ class RiskModelTrainer:
         )
         estimator = LogisticRegression(
             max_iter=self.config.max_iter,
+            tol=self.config.tolerance,
             class_weight=self.config.class_weight,
             solver="liblinear",
             random_state=self.config.random_state,

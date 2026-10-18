@@ -1,9 +1,20 @@
 export type HealthResponse = { status: string; service: string; version?: string }
+/**
+ * `/ready` reports three independent layers, so a green database cannot mask a
+ * stale artifact set. Kept in sync with backend/app/main.py; the previous shape
+ * here described a flat `checks` object that the endpoint has never returned.
+ */
 export type ReadinessResponse = {
   ready: boolean
   version: string
-  checks: { database: string; artifacts: string }
-  missing_artifacts: string[]
+  system: { database: string }
+  data: {
+    artifacts: string
+    data_quality: string
+    missing_artifacts: string[]
+    quality?: { ok: boolean; error_count: number; warning_count: number }
+  }
+  model: { ready: boolean; failed_checks: string[]; checks_run: number; promoted_model_id?: string | null }
   remedy?: string
 }
 

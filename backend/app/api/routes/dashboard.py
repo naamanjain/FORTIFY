@@ -14,8 +14,10 @@ from app.api.dependencies import (
     require_aggregate,
     require_audit,
     require_infrastructure,
+    require_unit_access,
     require_welfare,
     require_principal,
+    unit_scope_for,
 )
 from app.core.database import check_database
 from app.core.paths import ARTIFACTS_DIR as _DEFAULT_ARTIFACTS_DIR
@@ -23,7 +25,12 @@ from app.core.paths import AUDIT_PATH as _DEFAULT_AUDIT_PATH
 from app.core.paths import DATA_DIR as _DEFAULT_DATA_DIR
 from app.security.audit import AuditLog
 from app.security.principal import Principal
-from app.services.workflow import DataUnavailable, _workflow_id, get_item
+from app.services.workflow import (
+    DataUnavailable,
+    _workflow_id,
+    get_item,
+    open_case_id_for_person,
+)
 
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 
@@ -68,6 +75,32 @@ def _audit_access(role: str, purpose: str, outcome: str, resource: str, details:
 # patch it in isolation alongside AUDIT_PATH.
 def _authz_audit_path():
     return AUDIT_PATH
+
+
+def _with_units(frame: pd.DataFrame) -> pd.DataFrame:
+    """Attach unit_id to a person-day frame; a left join, so no row is dropped."""
+    if "unit_id" in frame.columns:
+        return frame
+    return frame.merge(
+        _read_csv("personnel.csv", ["person_id", "unit_id"]),
+        on="person_id", how="left", validate="many_to_one",
+    )
+
+
+def _scoped(frame: pd.DataFrame, principal: Principal) -> pd.DataFrame:
+    """Restrict rows to the caller's units BEFORE any count, sort or page.
+
+    Filtering after pagination would leak other units' people into the totals and
+    let a scoped officer infer the size of the rest of the force. A caller whose
+    scope cannot be resolved sees nothing - that is the fail-closed behaviour.
+    """
+    scope = unit_scope_for(principal)
+    if scope.all_units:
+        return frame
+    if not scope.units:
+        return frame.iloc[0:0]
+    joined = _with_units(frame)
+    return joined[joined["unit_id"].astype(str).isin(scope.units)]
 
 
 def _load_phase5() -> pd.DataFrame:
@@ -182,7 +215,15 @@ def overview(principal: Principal = FastAPIDepends(require_principal)) -> dict[s
         require_welfare(principal, "/api/dashboard/overview", _authz_audit_path())
     else:
         require_aggregate(principal, "/api/dashboard/overview", _authz_audit_path())
-    df = _dashboard_frame()
+    df = _scoped(_dashboard_frame(), principal)
+    if df.empty:
+        # A caller with no unit scope, or whose units have no records on this
+        # artifact, gets an honest zero rather than NaN leaking into the JSON.
+        return {"phase": "Phase 9 — Dashboard Integration", "as_of_date": None,
+                "personnel_count": 0, "risk_band_counts": {}, "feasibility_counts": {},
+                "priority_counts": {}, "high_band_count": 0, "requires_human_review_count": 0,
+                "scope_note": "No personnel are visible to this caller's unit scope.",
+                "data_policy": "Aggregate counts only; no personnel identifiers and no raw wellness responses are exposed."}
     latest_date = df["date"].max()
     latest = df[df["date"] == latest_date]
     band_counts = latest["risk_band"].value_counts().to_dict()
@@ -203,7 +244,10 @@ def attention(limit: int = Query(default=25, ge=1, le=100),
               principal: Principal = FastAPIDepends(require_principal)) -> dict[str, Any]:
     """Per-person cases needing human review. Welfare purpose only."""
     require_welfare(principal, "/api/dashboard/attention", _authz_audit_path())
-    df = _dashboard_frame()
+    df = _scoped(_dashboard_frame(), principal)
+    if df.empty:
+        return {"as_of_date": None, "cases": [], "count": 0,
+                "privacy_note": "Individual welfare detail; requires welfare-support authorization."}
     latest_date = df["date"].max()
     latest = df[df["date"] == latest_date]
     recent_high = latest[latest["risk_band"].astype(str).eq("HIGH")].sort_values(
@@ -225,7 +269,8 @@ def attention(limit: int = Query(default=25, ge=1, le=100),
 def trend(days: int = Query(default=30, ge=7, le=90),
           principal: Principal = FastAPIDepends(require_principal)) -> dict[str, Any]:
     require_aggregate(principal, "/api/dashboard/trend", _authz_audit_path())
-    df = _dashboard_frame(); dates = sorted(df["date"].unique())[-days:]; recent = df[df["date"].isin(dates)]
+    df = _scoped(_dashboard_frame(), principal)
+    dates = sorted(df["date"].unique())[-days:]; recent = df[df["date"].isin(dates)]
     grouped = recent.groupby("date", sort=True).agg(
         average_probability=("welfare_risk_probability", "mean"),
         high_count=("risk_band", lambda s: int((s == "HIGH").sum())),
@@ -238,8 +283,11 @@ def trend(days: int = Query(default=30, ge=7, le=90),
 @router.get("/units")
 def units(principal: Principal = FastAPIDepends(require_principal)) -> dict[str, Any]:
     require_aggregate(principal, "/api/dashboard/units", _authz_audit_path())
-    df = _dashboard_frame(); personnel = _read_csv("personnel.csv", ["person_id", "unit_id"]); latest_date = df["date"].max()
-    latest = df[df["date"] == latest_date].merge(personnel, on="person_id", how="left", validate="many_to_one")
+    df = _with_units(_scoped(_dashboard_frame(), principal))
+    if df.empty:
+        return {"as_of_date": None, "units": []}
+    latest_date = df["date"].max()
+    latest = df[df["date"] == latest_date]
     summary = latest.groupby("unit_id", dropna=False).agg(
         personnel=("person_id", "nunique"), high_risk=("risk_band", lambda s: int((s == "HIGH").sum())),
         constrained=("feasibility_status", lambda s: int(s.isin(["CONSTRAINED", "NOT_FEASIBLE"]).sum())), human_review=("requires_human_review_phase7", "sum"),
@@ -250,6 +298,8 @@ def units(principal: Principal = FastAPIDepends(require_principal)) -> dict[str,
 @router.get("/unit/{unit_id}")
 def unit_detail(unit_id: str, principal: Principal = FastAPIDepends(require_principal)) -> dict[str, Any]:
     require_aggregate(principal, f"/api/dashboard/unit/{unit_id}", _authz_audit_path())
+    require_unit_access(principal, unit_id, f"/api/dashboard/unit/{unit_id}", "aggregate",
+                        _authz_audit_path(), not_found_message="Unit not found")
     df = _dashboard_frame().merge(_read_csv("personnel.csv", ["person_id", "unit_id"]), on="person_id", how="left", validate="many_to_one")
     scoped = df[df["unit_id"].astype(str) == unit_id]
     if scoped.empty:
@@ -281,9 +331,21 @@ def person_detail(person_id: str, principal: Principal = FastAPIDepends(require_
     if identity_matches.empty:
         raise HTTPException(status_code=404, detail="Personnel record not found")
     identity_row = identity_matches.iloc[0]
+    # Object-level check: welfare purpose alone is not enough, the person must be
+    # in this caller's units. Denied answers repeat the not-found text verbatim so
+    # the endpoint cannot be used to discover which personnel ids exist.
+    require_unit_access(principal, str(identity_row["unit_id"]),
+                        f"/api/dashboard/person/{person_id}", "welfare", _authz_audit_path(),
+                        not_found_message="Personnel record not found")
     workflow_id = _workflow_id(person_id, str(latest["date"]))
+    principal_scope = unit_scope_for(principal)
     try:
-        workflow_item = get_item(workflow_id)
+        workflow_item = get_item(workflow_id, unit_scope=principal_scope)
+        if workflow_item is None:
+            # The case was opened on an earlier day and is still awaiting a
+            # decision; showing "no case" here would hide actionable work.
+            open_id = open_case_id_for_person(person_id, principal_scope)
+            workflow_item = get_item(open_id, unit_scope=principal_scope) if open_id else None
     except DataUnavailable:
         workflow_item = None
     workflow_payload = None
@@ -307,7 +369,7 @@ def person_detail(person_id: str, principal: Principal = FastAPIDepends(require_
 def personnel(query: str = Query(default="", max_length=40), unit_id: str | None = Query(default=None, max_length=40), risk_band: str | None = Query(default=None), limit: int = Query(default=50, ge=1, le=100),
               principal: Principal = FastAPIDepends(require_principal)) -> dict[str, Any]:
     require_welfare(principal, "/api/dashboard/personnel", _authz_audit_path())
-    df = _dashboard_frame().merge(_read_csv("personnel.csv", ["person_id", "unit_id"]), on="person_id", how="left", validate="many_to_one")
+    df = _with_units(_scoped(_dashboard_frame(), principal))
     latest = df.sort_values("date").groupby("person_id", as_index=False).tail(1)
     if query: latest = latest[latest["person_id"].astype(str).str.contains(query, case=False, regex=False)]
     if unit_id: latest = latest[latest["unit_id"].astype(str) == unit_id]
@@ -329,6 +391,13 @@ def search(query: str = Query(min_length=1, max_length=50), limit: int = Query(d
            principal: Principal = FastAPIDepends(require_principal)) -> dict[str, Any]:
     q = query.strip().lower(); results: list[dict[str, Any]] = []
     units_df = _read_csv("personnel.csv", ["person_id", "unit_id"]).drop_duplicates()
+    # Scope the candidate set first: searching must not report how many people or
+    # units exist outside the caller's own units.
+    scope = unit_scope_for(principal)
+    if not scope.all_units:
+        if not scope.units:
+            return {"query": query, "results": [], "privacy_note": "No personnel are visible to this caller's unit scope."}
+        units_df = units_df[units_df["unit_id"].astype(str).isin(scope.units)]
     matching_units = sorted(set(units_df.loc[units_df["unit_id"].astype(str).str.lower().str.contains(q, regex=False), "unit_id"].astype(str)))
     # Aggregate purpose sees units only; welfare purpose additionally sees
     # individual personnel. This branch is the purpose check.
@@ -378,7 +447,7 @@ def audit_view(limit: int = Query(default=25, ge=1, le=100),
                 malformed += 1
                 continue
             events.append({"event_type": record.get("event_type"), "actor_role": record.get("actor_role"), "purpose": record.get("purpose"),
-                           "outcome": record.get("outcome"), "resource": record.get("resource"), "timestamp": record.get("timestamp"),
+                           "outcome": record.get("outcome"), "resource": _redact_text(record.get("resource")), "timestamp": record.get("timestamp"),
                            "details": _redact_details(record.get("details", {}))})
     verification = log.verify()
     return {"chain_valid": verification.valid, "chain_reason": verification.reason,
@@ -394,13 +463,52 @@ def audit_view(limit: int = Query(default=25, ge=1, le=100),
 _REDACTED_DETAIL_KEYS = {"person_id"}
 
 
+def _redact_text(value: Any) -> Any:
+    """Redact personnel identifiers from free-text fields (URL paths in
+    resource fields, string details). The on-disk log keeps full values; the
+    read API does not."""
+    import re as _re
+
+    if not isinstance(value, str):
+        return value
+    return _re.sub(r"P-[0-9]{3,}", "[redacted:personnel-identifier]", value)
+
+
 def _redact_details(details: Any) -> Any:
     if not isinstance(details, dict):
-        return details
+        return _redact_text(details)
     return {
-        key: ("[redacted:personnel-identifier]" if key in _REDACTED_DETAIL_KEYS else _redact_details(value) if isinstance(value, dict) else value)
+        key: ("[redacted:personnel-identifier]" if key in _REDACTED_DETAIL_KEYS else _redact_details(value) if isinstance(value, dict) else _redact_text(value))
         for key, value in details.items()
     }
+
+
+_REVIEW_QUEUE_CACHE: dict[str, Any] = {}
+_REVIEW_QUEUE_LOCK = RLock()
+
+
+def _load_review_queue() -> pd.DataFrame:
+    """Load and cache the review queue by mtime, like the other artifacts.
+
+    This endpoint serves welfare officers on every screen load; re-parsing the
+    CSV per request measured ~1.2s at p95 under load, the single worst warm
+    path in the API.
+    """
+    path = DATA_DIR / "review_queue.csv"
+    if not path.exists():
+        raise HTTPException(status_code=503, detail="Review queue is unavailable; generate the dataset (python scripts/build_all.py).")
+    signature = _artifact_signature(path)
+    with _REVIEW_QUEUE_LOCK:
+        cached = _REVIEW_QUEUE_CACHE.get("frame")
+        if cached is not None and _REVIEW_QUEUE_CACHE.get("signature") == signature:
+            return cached
+        queue = pd.read_csv(path, usecols=["person_id", "date", "score", "risk_band",
+                                           "alert_state", "case_created", "suppressed_by_budget",
+                                           "evidence_days", "reason"])
+        queue["date"] = queue["date"].astype(str)
+        _REVIEW_QUEUE_CACHE["frame"] = queue
+        _REVIEW_QUEUE_CACHE["signature"] = signature
+        return queue
 
 
 @router.get("/review-queue")
@@ -413,11 +521,20 @@ def review_queue(date: str | None = Query(default=None, max_length=10),
     daily budget so the selection is auditable rather than silent.
     """
     require_welfare(principal, "/api/dashboard/review-queue", _authz_audit_path())
-    queue_path = DATA_DIR / "review_queue.csv"
-    if not queue_path.exists():
-        raise HTTPException(status_code=503, detail="Review queue is unavailable; generate the dataset (python scripts/build_all.py).")
-    queue = pd.read_csv(queue_path, usecols=["person_id", "date", "score", "risk_band", "alert_state", "case_created", "suppressed_by_budget", "evidence_days", "reason"])
-    queue["date"] = queue["date"].astype(str)
+    queue = _load_review_queue()
+    scope = unit_scope_for(principal)
+    if not scope.all_units:
+        if not scope.units:
+            return {"date": None, "cases": [], "suppressed_by_budget": [], "case_count": 0,
+                    "suppressed_count": 0, "open_signal_count": 0,
+                    "privacy_note": "No personnel are visible to this caller's unit scope."}
+        identities = _read_csv("personnel.csv", ["person_id", "unit_id"])
+        visible = set(identities.loc[identities["unit_id"].astype(str).isin(scope.units), "person_id"].astype(str))
+        queue = queue[queue["person_id"].astype(str).isin(visible)]
+    if queue.empty:
+        return {"date": None, "cases": [], "suppressed_by_budget": [], "case_count": 0,
+                "suppressed_count": 0, "open_signal_count": 0,
+                "privacy_note": "Queue metadata only; open individual cases through the welfare views."}
     target = date or str(queue["date"].max())
     day = queue[queue["date"] == target]
     cases = day[day["case_created"].astype(str).str.lower().isin(("true", "1"))]
@@ -436,6 +553,39 @@ def review_queue(date: str | None = Query(default=None, max_length=10),
     }
 
 
+_DRIFT_CACHE: dict[str, Any] = {}
+_DRIFT_LOCK = RLock()
+
+
+def _freshness_and_drift() -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    path = DATA_DIR / "risk_decisions.csv"
+    if not path.exists():
+        return None, None
+    signature = _artifact_signature(path)
+    with _DRIFT_LOCK:
+        cached = _DRIFT_CACHE.get("value")
+        if cached is not None and _DRIFT_CACHE.get("signature") == signature:
+            return cached
+    decisions = _read_csv("risk_decisions.csv", ["person_id", "date", "welfare_risk_probability"])
+    decisions["date"] = pd.to_datetime(decisions["date"])
+    latest_day = decisions["date"].max()
+    freshness = {"latest_event_date": str(latest_day.date()),
+                 "age_days": int((pd.Timestamp.now() - latest_day).days)}
+    drift = None
+    decisions["period"] = decisions["date"].dt.to_period("M").astype(str)
+    monthly = decisions.groupby("period")["welfare_risk_probability"].mean()
+    if len(monthly) >= 3:
+        recent, prior = monthly.iloc[-1], monthly.iloc[:-1].mean()
+        drift = {"recent_mean_score": round(float(recent), 4),
+                 "prior_mean_score": round(float(prior), 4),
+                 "shift": round(float(recent - prior), 4),
+                 "note": "Review indicator only; the score distribution drifting does not change the deployed model automatically."}
+    with _DRIFT_LOCK:
+        _DRIFT_CACHE["value"] = (freshness, drift)
+        _DRIFT_CACHE["signature"] = signature
+    return freshness, drift
+
+
 @router.get("/system-health")
 def system_health(principal: Principal = FastAPIDepends(require_principal)) -> dict[str, Any]:
     # Health is intentionally readable by BOTH the infrastructure administrator
@@ -448,7 +598,7 @@ def system_health(principal: Principal = FastAPIDepends(require_principal)) -> d
     else:
         raise HTTPException(status_code=403, detail="System health is restricted to administrative or audit roles.")
     db_ok = check_database()
-    verification = AuditLog(AUDIT_PATH).verify()
+    verification = AuditLog(AUDIT_PATH).verify_incremental()
     # Only artifacts the running API actually consumes at request time.
     artifacts = ["personnel.csv", "intervention_recommendations.csv", "intervention_feasibility.csv", "review_queue.csv"]
     artifact_status = {name: (DATA_DIR / name).exists() for name in artifacts}
@@ -466,25 +616,9 @@ def system_health(principal: Principal = FastAPIDepends(require_principal)) -> d
         pass
 
     # Data freshness and a coarse score-drift indicator for review (never an
-    # automatic retraining trigger).
-    freshness = None
-    drift = None
-    try:
-        decisions = _read_csv("risk_decisions.csv", ["person_id", "date", "welfare_risk_probability"])
-        decisions["date"] = pd.to_datetime(decisions["date"])
-        latest_day = decisions["date"].max()
-        freshness = {"latest_event_date": str(latest_day.date()),
-                     "age_days": int((pd.Timestamp.now() - latest_day).days)}
-        decisions["period"] = decisions["date"].dt.to_period("M").astype(str)
-        monthly = decisions.groupby("period")["welfare_risk_probability"].mean()
-        if len(monthly) >= 3:
-            recent, prior = monthly.iloc[-1], monthly.iloc[:-1].mean()
-            drift = {"recent_mean_score": round(float(recent), 4),
-                     "prior_mean_score": round(float(prior), 4),
-                     "shift": round(float(recent - prior), 4),
-                     "note": "Review indicator only; the score distribution drifting does not change the deployed model automatically."}
-    except HTTPException:
-        pass
+    # automatic retraining trigger). Cached by mtime: this endpoint is polled
+    # by monitors, and the drift read parses an 18 MB CSV.
+    freshness, drift = _freshness_and_drift()
 
     return {"application": {"api": "Healthy", "database": "Healthy" if db_ok else "Warning",
                             "dashboard_cache": "Warm" if cache_ready else "Cold"},

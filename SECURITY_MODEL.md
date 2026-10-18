@@ -62,6 +62,20 @@ Analytics-facing identifiers can be generated with deterministic HMAC-SHA256 pse
 ### Purpose-bound RBAC
 The prototype defines four existing architectural roles and explicit access purposes. Welfare access is limited to the welfare role; commanders receive aggregate operational purpose access; infrastructure administration does not automatically grant welfare access; auditors receive audit-purpose access.
 
+### Object-level (unit) scope
+Purpose and role answer *"is this the right kind of viewer?"*. They do not answer *"which person?"* - and a welfare roster is the sensitive part of this system, so a second check is enforced at the same choke point:
+
+- Every caller resolves to an explicit **allow-list of unit ids**. A verified identity takes it from its own IdP claims; the unauthenticated demonstration build takes it from `FORTIFY_DEMO_UNIT_SCOPE`.
+- **Fail closed.** Empty, missing, malformed or unrecognised scope grants no person-level access and no rows in aggregate views - it never means "all units".
+- The scope is applied in the **query predicate**, before counting, sorting and pagination, so totals, page sizes and search results describe only the caller's units.
+- Case mutations **re-check scope on the locked row inside the transaction**, so a case that moved units, or a request built from a stale view, cannot slip through.
+- Out-of-scope objects return the **same 404 as unknown ones**, denying the enumeration oracle a distinct 403 would create.
+- Scope is never read from a header or query parameter; there is no request field an attacker can set to widen it.
+- Auditor and administrator purposes receive no person-level welfare data, and per-case history returned under the `AUDIT` purpose has personnel identifiers removed.
+- The demo-wide permission `demo:all-units` is honoured **only** for unauthenticated header trust and **only** in `FORTIFY_AUTH_MODE=demo`; it cannot widen a verified identity, and production mode still refuses to boot without a real authenticator.
+
+Enforced and endpoint-tested in `backend/tests/test_unit_scope_endpoints.py`; the suite is proven to detect the guard's absence (15 of 19 tests fail when scope resolution is neutered).
+
 ### Audit logging
 `AuditLog` writes append-only JSONL events with a SHA-256 hash chain plus an **anchored head**: the record count and final hash are mirrored to a separate anchor file, signed with HMAC-SHA256 under a key held outside the log (`FORTIFY_AUDIT_HMAC_KEY`, or a generated key file stored with owner-only permissions in the prototype). This makes three attacks detectable that a bare hash chain cannot see:
 

@@ -8,5 +8,9 @@ metadata:
 data:
   # Absolute path on the mounted PVC (see backend/.env.example for semantics).
   FORTIFY_DATABASE_URL: sqlite:////app/data/runtime/fortify.db
-  # Same-origin through the frontend proxy; direct browser access in dev only.
+  # Same-origin through the frontend Service, so normal traffic needs no CORS
+  # entry at all. This value only applies to a browser hitting the API directly,
+  # i.e. `kubectl port-forward` on a workstation. BEFORE exposing the ingress,
+  # replace it with the real deployment origin (https://<host>) - localhost:5173
+  # is a developer-workstation value and must not survive into a live cluster.
   FORTIFY_CORS_ORIGINS: http://localhost:5173

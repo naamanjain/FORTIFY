@@ -66,9 +66,23 @@ def test_production_authenticator_can_be_registered() -> None:
     import app.api.dependencies as deps
     from app.security.principal import AuthenticationError, Principal
     from app.security.security_config import AccessPurpose, SecurityRole
+    from app.services.workflow import _personnel_unit_map
+
+    # Resolved from the repository's own data, not a hardcoded unit id.
+    p0001_unit = _personnel_unit_map()["P-0001"]
 
     class StubOIDC:
+        """A registered real authenticator, as an IdP adapter would behave.
+
+        It issues authenticated principals carrying an explicit unit claim; an
+        identity with no claim is deliberately included to prove scope comes from
+        claims and never from the demo configuration.
+        """
+
         method_name = "oidc"
+
+        def __init__(self, unit_claim: frozenset[str] | None = None) -> None:
+            self._unit_claim = unit_claim
 
         def authenticate(self, credentials: dict[str, str]) -> Principal:
             token = credentials.get("authorization", "")
@@ -80,11 +94,12 @@ def test_production_authenticator_can_be_registered() -> None:
                 purpose=AccessPurpose.WELFARE_SUPPORT,
                 auth_method=self.method_name,
                 authenticated=True,
+                unit_scope=self._unit_claim or frozenset(),
             )
 
     original = deps.get_authenticator()
     try:
-        deps.set_authenticator(StubOIDC())
+        deps.set_authenticator(StubOIDC(frozenset({p0001_unit})))
         with TestClient(app) as client:
             ok = client.get(
                 "/api/dashboard/person/P-0001",
@@ -93,5 +108,15 @@ def test_production_authenticator_can_be_registered() -> None:
             denied = client.get("/api/dashboard/person/P-0001")
         assert ok.status_code == 200
         assert denied.status_code == 401
+
+        # Same role, same purpose, same verified session - but the token carries
+        # no unit claim, so person-level welfare data is not available to it.
+        deps.set_authenticator(StubOIDC(None))
+        with TestClient(app) as client:
+            unscoped = client.get(
+                "/api/dashboard/person/P-0001",
+                headers={"Authorization": "Bearer test-token"},
+            )
+        assert unscoped.status_code == 404
     finally:
         deps.set_authenticator(original)

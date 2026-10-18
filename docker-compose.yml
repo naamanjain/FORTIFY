@@ -23,6 +23,12 @@ services:
       # The demo workflow state must also live on the mounted volume (the
       # image's backend/ tree is read-only for the runtime user).
       FORTIFY_DATABASE_URL: sqlite:////app/data/runtime/fortify.db
+    healthcheck:
+      # backend/Dockerfile declares an HTTP liveness check against :8000. This
+      # container runs a batch job and never binds a port, so that probe always
+      # reports "unhealthy" during a perfectly successful run - and would wedge
+      # any future service_healthy dependency on it.
+      disable: true
     volumes:
       - fortify-data:/app/data/generated
       - fortify-runtime:/app/data/runtime

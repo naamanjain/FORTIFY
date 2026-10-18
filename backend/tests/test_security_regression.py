@@ -21,6 +21,8 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.security.audit import AuditEvent, AuditLog
+from app.security.rbac import UnitScope as _UnitScope
+_SCRIPT_SCOPE = _UnitScope.script()
 
 
 def headers(role: str = "WELFARE_OFFICER", purpose: str = "WELFARE_SUPPORT") -> dict[str, str]:
@@ -320,10 +322,10 @@ class TestConcurrency:
         overwrite their decision."""
         from app.services.workflow import get_item, list_items, transition_item
 
-        item = next(iter(list_items(pending_only=True, limit=1)), None)
+        item = next(iter(list_items(pending_only=True, limit=1, unit_scope=_SCRIPT_SCOPE)), None)
         if item is None:
             pytest.skip("no pending workflow items in the demo database")
-        current_state = get_item(item["workflow_item_id"])["workflow_state"]
+        current_state = get_item(item["workflow_item_id"], unit_scope=_SCRIPT_SCOPE)["workflow_state"]
         with pytest.raises(ValueError, match="changed since it was loaded"):
             transition_item(
                 item["workflow_item_id"],
@@ -332,16 +334,17 @@ class TestConcurrency:
                 purpose="WELFARE_SUPPORT",
                 reason_code="regression-test",
                 expected_state="NEW" if current_state != "NEW" else "IN_REVIEW",
+                unit_scope=_SCRIPT_SCOPE,
             )
 
     def test_transition_still_succeeds_with_correct_expected_state(self) -> None:
         from app.services.workflow import get_item, list_items, transition_item
 
-        item = next(iter(list_items(pending_only=True, limit=1)), None)
+        item = next(iter(list_items(pending_only=True, limit=1, unit_scope=_SCRIPT_SCOPE)), None)
         if item is None:
             pytest.skip("no pending workflow items in the demo database")
         item_id = item["workflow_item_id"]
-        state = get_item(item_id)["workflow_state"]
+        state = get_item(item_id, unit_scope=_SCRIPT_SCOPE)["workflow_state"]
         allowed = {"NEW": "ACKNOWLEDGED", "ACKNOWLEDGED": "IN_REVIEW",
                    "IN_REVIEW": "DEFERRED", "DEFERRED": "ACKNOWLEDGED",
                    "SUPPORT_PLANNED": "DEFERRED"}
@@ -353,15 +356,17 @@ class TestConcurrency:
                 item_id, new_state=target, actor_role="WELFARE_OFFICER",
                 purpose="WELFARE_SUPPORT", reason_code="concurrency-test",
                 expected_state=state,
+                unit_scope=_SCRIPT_SCOPE,
             )
             assert updated["workflow_state"] == target
         finally:
             # Best-effort restore so the suite stays repeatable.
             reverse = {"ACKNOWLEDGED": None, "IN_REVIEW": None, "DEFERRED": "IN_REVIEW"}
-            if reverse.get(target) and get_item(item_id)["workflow_state"] == target:
+            if reverse.get(target) and get_item(item_id, unit_scope=_SCRIPT_SCOPE)["workflow_state"] == target:
                 try:
                     transition_item(item_id, new_state=reverse[target],
                                     actor_role="WELFARE_OFFICER", purpose="WELFARE_SUPPORT",
-                                    reason_code="concurrency-test-restore")
+                                    reason_code="concurrency-test-restore",
+                                    unit_scope=_SCRIPT_SCOPE)
                 except ValueError:
                     pass

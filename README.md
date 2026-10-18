@@ -158,7 +158,9 @@ pip install -r backend/requirements.txt
 python scripts/build_all.py
 
 # 3. Start the API
-uvicorn app.main:app --app-dir backend --port 8000
+#    `python -m uvicorn` is used instead of the bare `uvicorn` launcher because the
+#    Scripts/ console shim is not always on PATH on Windows.
+python -m uvicorn app.main:app --app-dir backend --port 8000
 
 # 4. Start the frontend (in a second terminal)
 cd frontend
@@ -173,8 +175,10 @@ Verify the whole thing:
 
 ```bash
 curl http://localhost:8000/health   # liveness: process is up
-curl http://localhost:8000/ready    # readiness: database + artifacts + data quality
-# {"ready":true,"version":"0.2.0","checks":{"database":"ok","artifacts":"ok","data_quality":"ok"},...}
+curl http://localhost:8000/ready    # readiness: system + data + model layers
+# {"ready":true,"version":"0.2.0","system":{"database":"ok"},
+#  "data":{"artifacts":"ok","data_quality":"ok","missing_artifacts":[],"quality":{...}},
+#  "model":{"ready":true,"failed_checks":[],"checks_run":5,"promoted_model_id":"phase4-..."}}
 curl http://localhost:8000/version  # deployment identification
 curl http://localhost:8000/metrics  # Prometheus-format request counters
 ```
@@ -185,13 +189,18 @@ A `/ready` 503 names the exact missing dependency and the command that fixes it.
 
 ## Environment variables
 
-All variables are optional — the defaults work for local development. Copy
-`backend/.env.example` to `backend/.env` (or export them) to override.
+All variables are optional — the defaults work for local development. They are read
+from the **process environment only**: this application has no `.env` loader, so
+export them in your shell (`$env:NAME = "value"` in PowerShell) or pass them to
+your container runtime. The `.env.example` files document the names; copying one to
+`.env` has no effect.
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `FORTIFY_DATABASE_URL` | `sqlite:///./backend/fortify.db` | SQLite location. Relative paths resolve against the repo root, not the CWD. |
 | `FORTIFY_CORS_ORIGINS` | `http://localhost:5173` | Comma-separated allowed browser origins. |
+| `FORTIFY_AUTH_MODE` | `demo` | `demo` = header trust; `production` = refuses to start until a real OIDC authenticator is configured. |
+| `FORTIFY_DEMO_UNIT_SCOPE` | `demo:all-units` | Object-level scope for the unauthenticated demo build: a comma-separated list of real unit ids, or the named `demo:all-units` permission. Empty or malformed denies person-level access. Never honoured for a verified identity, never honoured in `production`. |
 | `FORTIFY_DATA_DIR` | `<repo>/data/generated` | Where generated CSVs are read from. |
 | `FORTIFY_RUNTIME_DIR` | `<repo>/data/runtime` | Runtime state directory (DB, audit log). |
 | `FORTIFY_AUDIT_LOG` | `<repo>/data/runtime/audit.jsonl` | Hash-chained audit log path. |
@@ -292,9 +301,18 @@ volume, no autoscaling, no TLS by default, and no authentication.
 ## Tests and validators
 
 ```bash
-pytest -q                                   # 103 backend tests
+pytest -q                                   # 273 collected: 271 pass / 2 skip after a
+                                            # lifecycle run; 269 pass / 4 skip on a
+                                            # pristine demo store (see note below)
 cd frontend && npm run build                # TypeScript check + production build
 ```
+
+Two tests are state-dependent by design: one contract test needs a case that
+already has feedback recorded, and one red-team attack needs a support-completed
+case. On a freshly materialised demo store every case is still `NEW`, so those
+two skip as well - 4 skips instead of 2. A skip is reported as NOT EXECUTED, not
+as a pass; run `python scripts/verify_workflow_lifecycle.py` against a live
+server first and both find their precondition.
 
 The suite is self-contained (it builds its own fixtures in `tmp_path`), but 30 integration tests read
 the generated artifacts — so run `python scripts/build_all.py` at least once in the working

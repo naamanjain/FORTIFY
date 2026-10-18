@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from backend.app.ml.model_compat import verify as verify_compatibility
 from backend.app.ml.model_config import ModelConfig
 from backend.app.ml.model_training import RiskModelTrainer
 from backend.app.ml.risk_decision import (
@@ -54,6 +55,16 @@ def main() -> int:
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     feature_columns = metadata["feature_columns"]
     model = joblib.load(phase4_model_path)
+
+    # Hard gate: refuse to build the decision layer on incompatible artifacts.
+    compat = verify_compatibility(features_path, metadata_path)
+    if not compat.compatible:
+        failed = [c["check"] for c in compat.checks if not c["ok"]]
+        raise SystemExit(
+            f"Model artifact compatibility FAILED: {failed}. "
+            "Regenerate the pipeline (scripts/build_all.py) rather than mixing artifacts."
+        )
+    print(f"Artifact compatibility verified: {len(compat.checks)} checks")
 
     trainer = RiskModelTrainer(ModelConfig(random_state=args.seed))
     targets = build_future_wellness_target(features)

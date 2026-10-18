@@ -17,10 +17,25 @@ spec:
         app.kubernetes.io/name: fortify-frontend
         app.kubernetes.io/part-of: fortify
     spec:
+      volumes:
+        - name: nginx-cache
+          emptyDir: {}
+        - name: nginx-run
+          emptyDir: {}
       containers:
         - name: web
           image: fortify-frontend:latest
           imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: nginx-cache
+              mountPath: /var/cache/nginx
+            - name: nginx-run
+              mountPath: /var/run
           ports:
             - name: http
               containerPort: 80

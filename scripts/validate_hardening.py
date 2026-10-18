@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import sqlite3
 import sys
@@ -57,6 +58,41 @@ def validate_privacy(frame: pd.DataFrame, name: str) -> None:
         raise SystemExit(f"VALIDATION FAILED: {name} exposes raw wellness fields {raw}")
 
 
+def validate_console_encoding(project: Path) -> list[str]:
+    """Gate scripts must be printable on a default Windows console (cp1252).
+
+    A validator that raises UnicodeEncodeError while reporting its own result
+    exits non-zero even when every assertion inside it passed, which reads
+    locally as a failed gate and is indistinguishable from a real regression.
+    """
+    offenders: list[str] = []
+    callables = {"print", "check", "SystemExit"}
+    for path in sorted((project / "scripts").glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        nodes: list[ast.AST] = list(ast.walk(tree))
+        for node in nodes:
+            if isinstance(node, ast.Raise):
+                targets = [node.exc] if node.exc is not None else []
+            elif isinstance(node, ast.Call) and (
+                (isinstance(node.func, ast.Name) and node.func.id in callables)
+                or (isinstance(node.func, ast.Attribute) and node.func.attr in callables)
+            ):
+                targets = list(node.args) + [keyword.value for keyword in node.keywords]
+            else:
+                continue
+            for target in targets:
+                for child in ast.walk(target):
+                    if isinstance(child, ast.Constant) and isinstance(child.value, str):
+                        try:
+                            child.value.encode("cp1252")
+                        except UnicodeEncodeError:
+                            offenders.append(
+                                f"scripts/{path.name}:{node.lineno} cannot print "
+                                f"{child.value[:48]!r}"
+                            )
+    return offenders
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Validate FORTIFY Phase 11 hardening contracts")
     parser.add_argument("--root", default=str(ROOT))
@@ -106,6 +142,13 @@ def main() -> int:
     if health.status_code != 200 or health.json() != expected_health:
         raise SystemExit("VALIDATION FAILED: health endpoint")
 
+    encoding_offenders = validate_console_encoding(project)
+    if encoding_offenders:
+        raise SystemExit(
+            "VALIDATION FAILED: scripts that crash when printed on a cp1252 console:\n  "
+            + "\n  ".join(encoding_offenders)
+        )
+
     report = {
         "phase": "Phase 11 — Testing + Hardening",
         "artifacts_checked": 3,
@@ -115,6 +158,7 @@ def main() -> int:
         "workflow_indexes": "PASS",
         "privacy_schema": "PASS",
         "health_endpoint": "PASS",
+        "console_encoding": "PASS",
         "synthetic_data": True,
     }
     print("PHASE 11 HARDENING VALIDATION PASSED")

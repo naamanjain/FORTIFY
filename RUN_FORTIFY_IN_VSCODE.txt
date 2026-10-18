@@ -1,0 +1,741 @@
+================================================================================
+FORTIFY - RUNNING THE FRONTEND AND BACKEND IN VS CODE (WINDOWS / PowerShell)
+================================================================================
+
+What this file is
+-----------------
+A copy-paste guide to get FORTIFY running on your own machine, in two VS Code
+terminals, so you can demonstrate it to another person.
+
+Every command in the "verified" blocks below was executed against this
+repository on Windows with PowerShell as the shell. Where a command was NOT
+executed here, the block says so explicitly instead of pretending.
+
+Product scope, so the demo is described honestly
+------------------------------------------------
+FORTIFY is a privacy-conscious, human-in-the-loop WELFARE DECISION-SUPPORT
+PROTOTYPE built on SYNTHETIC data. It is not a medical, psychiatric or
+disciplinary system and it does not prove anything about a real person.
+Real departmental data is not present in this repository, and real-world
+predictive validity has NOT been demonstrated. See docs/PRODUCTION_READINESS.md.
+
+The prototype has NO real authentication. It trusts two request headers.
+Do not expose it to an untrusted network. (Security note at the end.)
+
+--------------------------------------------------------------------------------
+0. PREREQUISITES
+--------------------------------------------------------------------------------
+Versions confirmed from this repository and this machine:
+
+  REQUIRED
+    Python  3.13   (developed and test-suite-verified on 3.13; 3.11+ should work)
+    Node.js 24     (frontend package.json + CI use Node 24; 20+ should work)
+    Git              (only if you clone the repository instead of copying the folder)
+
+  OPTIONAL
+    Docker Desktop with Compose v2  (only for section 6, "Docker")
+    A second monitor                (strongly recommended, you will use 2-3 terminals)
+
+Check yours in PowerShell:
+
+    python --version
+    node --version
+    npm --version
+    docker --version        # optional
+
+There is NO database server to install. FORTIFY uses a SQLite file that it
+creates by itself, plus generated CSV files.
+
+--------------------------------------------------------------------------------
+1. OPEN THE FOLDER IN VS CODE
+--------------------------------------------------------------------------------
+Open the REPOSITORY ROOT folder - the one that contains README.md, backend/,
+frontend/, scripts/ and docker-compose.yml. Do not open backend/ or frontend/
+on its own: several scripts resolve paths from the repository root and will not
+find their data otherwise.
+
+  File > Open Folder... > <path to FORTIFY>
+
+Then open a terminal with  Ctrl + `  and make sure the dropdown in the terminal
+panel says "powershell", not "cmd" or "git-bash".
+
+All commands below assume your working directory is the repository root unless
+a line explicitly says otherwise. Check where you are with:
+
+    Get-Location
+    ls          # you should see README.md, backend, frontend, scripts
+
+
+================================================================================
+2. FIRST-TIME SETUP  (run once)
+================================================================================
+--------------------------------------------------------------------------------
+2a. Python virtual environment + backend dependencies
+--------------------------------------------------------------------------------
+    python -m venv .venv
+    .\.venv\Scripts\Activate.ps1
+    pip install -r backend\requirements.txt
+
+You should see "(.venv)" appear at the left of your prompt after activation.
+
+VERIFICATION STATUS - what was actually run here:
+  * `python -m venv .venv`  -> exit 0 on this machine.
+  * `.\.venv\Scripts\Activate.ps1` -> exit 0; `$env:VIRTUAL_ENV` pointed at the
+    new .venv and `python` resolved to .venv\Scripts\python.exe (3.13.7), with
+    pip 25.2 inside it.
+  * `python -m pip install -r backend\requirements.txt` -> **executed here: exit
+    0**, 41 packages installed to the exact pins (fastapi 0.141.1, uvicorn
+    0.52.4, pydantic 2.13.4, pandas 2.3.3, numpy 2.4.2, scipy 1.17.1,
+    scikit-learn 1.9.0, joblib 1.5.3, cryptography 46.0.7, PyJWT 2.13.0,
+    httpx 0.28.1, pytest 8.4.2, python-multipart 0.0.32), and every one of them
+    imported successfully from inside the venv.
+  The .venv was created only to verify these commands and was removed again, so
+  you will be creating it yourself. Your global interpreter may already satisfy
+  the pins; if `python -c "import fastapi"` works before step 2a, the backend
+  will still run - the venv is for not disturbing that machine-wide setup.
+
+If activation fails with an "execution of scripts is disabled" /
+"UnauthorizedAccess" error, see Troubleshooting 8.4.
+
+--------------------------------------------------------------------------------
+2b. Frontend dependencies
+--------------------------------------------------------------------------------
+    cd frontend
+    npm install
+    cd ..
+
+`npm install` was not re-run here either (node_modules is already present and
+`npm run build` and `npm run dev` both work against it). It is the correct
+first-time command on a fresh clone.
+
+--------------------------------------------------------------------------------
+2c. Generate the demo data and models  (REQUIRED on a fresh clone)
+--------------------------------------------------------------------------------
+    python scripts\build_all.py
+
+This is the deterministic pipeline: synthetic personnel and operational events
+-> features -> personal baselines -> model -> calibration -> risk decisions ->
+recommendations -> feasibility -> review queue -> demo case seeding. Seed is
+pinned at 42, so the output is reproducible.
+
+  MEASURED ON THIS MACHINE: 421.4 s (7 min 1 s) when nothing else ran; 606.7 s
+  (10 min 7 s) when the test suite and Docker were competing for the same disk.
+  Exit code 0 both times, Python 3.13 / Windows.
+  Writes ~447 MB into data/generated/ (the largest single file is
+  person_day_features_baseline.csv at ~204 MB) plus models and reports in
+  artifacts/. README quotes "~375 MB"; the measured figure is higher.
+
+  Per-step, so you know where the time goes (measured, same run):
+      generate_synthetic_data.py    19.7 s
+      build_features.py            291.5 s   <- 69% of the total, be patient
+      build_baselines.py            16.4 s
+      train_model.py                21.8 s
+      build_phase5_risk_layer.py    18.7 s
+      build_review_queue.py          1.9 s
+      build_interventions.py        26.0 s
+      build_feasibility.py          22.2 s
+      prepare_demo.py                3.3 s
+
+This step is the slow one. It is NOT needed again unless you delete the
+generated files, change a pinned dependency version, or change the generator.
+Section 5 ("After first setup") does not repeat it.
+
+WARNING: build_all.py ends by re-running prepare_demo.py, which resets the demo
+workflow state. Any review decisions you made in the UI are discarded. Run it
+between demos, not during one.
+
+You will know it worked when the last line reads:
+
+    PIPELINE COMPLETE in 421.4s
+    Next: start the backend (see README) and open the frontend.
+
+and you can see the files:
+
+    ls data\generated\duty_events.csv
+    ls artifacts\phase4\model_metadata.json
+
+
+================================================================================
+3. TERMINAL 1 - BACKEND (leave this terminal running)
+================================================================================
+Working directory: REPOSITORY ROOT.
+The backend is started from the repo root with `--app-dir backend`; you do NOT
+need to cd into backend\.
+
+    python -m uvicorn app.main:app --app-dir backend --port 8000 --host 127.0.0.1
+
+Why `python -m uvicorn` and not plain `uvicorn`: both were tested on this
+machine. Inside an activated `.venv` the bare launcher exists
+(`.venv\Scripts\uvicorn.exe`) and works. On this machine's GLOBAL interpreter the
+`uvicorn.exe` shim is not present on PATH, so `uvicorn ...` fails with
+"command not found" unless you activated a venv first. `python -m uvicorn` works
+in both situations, so this file uses it throughout.
+
+Verified in the test venv: `python -m uvicorn --version` ->
+"Running uvicorn 0.52.4 with CPython 3.13.7 on Windows".
+
+Expected success indication (the run stays in the foreground):
+
+    INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+    INFO:     Application startup complete.
+
+Do not close this terminal. Open a NEW terminal (the + button in the panel) for
+step 4.
+
+If the app starts but the data endpoints return HTTP 503, the generated files
+are missing - run 2c. `/ready` names the exact missing artifact.
+
+
+================================================================================
+4. TERMINAL 2 - FRONTEND (leave this running too)
+================================================================================
+Working directory: frontend\  (cd into it in this second terminal)
+
+    cd frontend
+    npm run dev
+
+Expected success indication:
+
+    VITE v7.3.6  ready in <n> ms
+      Local:   http://localhost:5173/
+
+Open  http://localhost:5173  in your browser.
+
+The Vite dev server proxies /api and /health to http://localhost:8000, so the
+browser talks to one origin and you do not have to configure CORS.
+Note: /ready, /version and /metrics are NOT proxied by the dev server; check
+those with Terminal 3 instead.
+
+WHAT YOU SHOULD SEE (this is the check that the stack is really wired up):
+  * The Attention page lists open welfare cases. From a freshly rebuilt demo
+    store on the standard 500 x 180-day build, MEASURED here: **183 open cases -
+    118 HIGH ("needs attention") and 65 MODERATE ("worth checking")**. Expect
+    these within a few cases: the numbers move as review decisions are made and
+    as the alert policy's budget changes with regenerated data. If this page
+    shows "0 cases shown" while the backend is running, the frontend is not
+    reaching the API - see 8.6.
+  * Click a person -> the profile shows the signal, what changed, the recommended
+    welfare support, whether it is feasible, and the review actions.
+  * Make a review decision (e.g. acknowledge / start review) -> reload the page;
+    the decision is still there. That proves it reached SQLite and not just React
+    state, and that an audit event was written.
+
+  * If you are following the scripted walkthrough in DEMO_SCENARIO.md, get the
+    hero case id from the manifest rather than from the prose, because it moves
+    whenever the data is regenerated:
+
+        python -c "import json;m=json.load(open('artifacts/phase12/demo_manifest.json',encoding='utf-8'));print(m['hero_case']['person_id'], m['hero_case']['target_date'], m['hero_case']['workflow_state_at_preparation'])"
+
+    Measured on this build: P-0182, 2026-01-28, NEW. Then open
+    http://localhost:5173/person/P-0182 .
+
+Demo note - the role is fixed at BUILD time, not login time:
+  The frontend sends one role for the whole session, from VITE_FORTIFY_ROLE
+  (default WELFARE_OFFICER). With the default you CANNOT open the Governance
+  page: it calls audit and system-health endpoints that require the AUDITOR role,
+  and correctly shows an "Access restricted" panel. (Verified: the panel is
+  honest, it does not fake a pass or a failure.) To demonstrate the auditor
+  view, stop the frontend and start it with the role set:
+
+      $env:VITE_FORTIFY_ROLE = "AUDITOR"
+      $env:VITE_FORTIFY_PURPOSE = "AUDIT"
+      npm run dev
+
+  VERIFIED OUTPUT of that command on this machine - the Governance page then
+  renders:
+
+      Audit chain            Verified
+      25 events in current view · 4937 total in log
+      Audit chain is intact.
+      Access controls        Prototype role/purpose headers (not authenticated)
+      Authentication         None (header-trust prototype)
+
+  and the recent-events table lists the ALLOWED and DENIED access decisions,
+  including the refusals produced by the role checks.
+
+  (unset with `Remove-Item Env:VITE_FORTIFY_ROLE` when you go back). This is
+  presentation switching for a demo, NOT authentication - see the security note.
+
+Demoing unit scoping (new in this build) - backend side, no rebuild needed:
+
+  Person-level access is now restricted to an explicit list of unit ids. Out of
+  the box the demonstration runs with the named permission `demo:all-units`, so
+  you see everything. To show the guard working, restart the backend scoped to
+  two real units from the dataset:
+
+      $env:FORTIFY_DEMO_UNIT_SCOPE = "U-011,U-012"
+      python -m uvicorn app.main:app --app-dir backend --port 8000 --host 127.0.0.1
+
+  What changes on screen - VERIFIED IN THE BROWSER on this build (scoped to
+  U-011,U-012 and compared with the all-units default):
+    * Attention header reads "49 synthetic personnel" instead of 500, and the
+      queue shows 23 cases (12 needs attention, 11 worth checking) instead of the
+      full 183. These are the same two units' people, not a broken page.
+    * The Unit filter lists ONLY U-011 and U-012. Nothing from another unit
+      appears in options, counts, totals or search results.
+    * Opening a person outside your scope shows the honest error panel
+      "We couldn't load this view / Personnel record not found" with a working
+      Try again control. The page does NOT blank out, and the browser console has
+      no unhandled exceptions - only the expected 404 network entries.
+    * A mutating request against another unit's case is refused even when the
+      request carries the correct current state.
+    * Deliberate: the out-of-scope answer is the SAME status and the SAME text as
+      a genuinely nonexistent id. That is what stops the profile endpoint being
+      used to discover which personnel ids exist, so it is a feature, not a bad
+      error message.
+  To demonstrate the fail-closed rule, set an empty or nonsense value:
+
+      $env:FORTIFY_DEMO_UNIT_SCOPE = ""          # or "U-***"  -> no person access
+
+  Simplest way to run this demo without touching ports: stop the backend, set
+  FORTIFY_DEMO_UNIT_SCOPE, and start it again on 8000 exactly as in Terminal 1.
+  The proxy keeps everything same-origin, so you do not have to think about CORS.
+  Two things this scope is NOT: it is not authentication (headers still decide
+  the role), and it does not apply to a verified identity. A real OIDC token is
+  scoped only by its own claims and ignores FORTIFY_DEMO_UNIT_SCOPE entirely;
+  `demo:all-units` can never widen a verified identity, and
+  `FORTIFY_AUTH_MODE=production` still refuses to boot without a real provider.
+
+
+================================================================================
+5. AFTER FIRST SETUP - the only commands you need next time
+================================================================================
+You do NOT re-run pip install, npm install, or build_all.py. Two terminals:
+
+TERMINAL 1 - backend (from repository root):
+
+    .\.venv\Scripts\Activate.ps1
+    python -m uvicorn app.main:app --app-dir backend --port 8000 --host 127.0.0.1
+
+TERMINAL 2 - frontend (from frontend\):
+
+    cd frontend
+    npm run dev
+
+That is the whole demo startup. If you skip activation and your global Python
+already has the pinned packages, the backend line still works.
+
+
+================================================================================
+6. TERMINAL 3 (OPTIONAL) - CHECKS, TESTS AND DIAGNOSTICS
+================================================================================
+--------------------------------------------------------------------------------
+6a. Is it actually healthy? (run while the backend is up)
+--------------------------------------------------------------------------------
+PowerShell-native, no curl alias surprises:
+
+    Invoke-RestMethod http://127.0.0.1:8000/health  | ConvertTo-Json
+    Invoke-RestMethod http://127.0.0.1:8000/ready   | ConvertTo-Json -Depth 5
+    Invoke-RestMethod http://127.0.0.1:8000/version | ConvertTo-Json
+
+Expected /health:   {"status":"ok","service":"FORTIFY","version":"0.2.0"}
+Expected /version:  {"service":"FORTIFY","version":"0.2.0"}
+
+/ready is the one that matters before a demo. It reports three independent
+layers so a healthy process cannot hide missing data:
+
+    {"ready":true,
+     "system":{"database":"ok"},
+     "data":{"artifacts":"ok","data_quality":"ok","missing_artifacts":[], ...},
+     "model":{"ready":true,"failed_checks":[],"checks_run":5, ...}}
+
+`ready:false` returns HTTP 503 and names what is missing plus the command that
+fixes it. Expect one standing data-quality WARNING: the synthetic world ends on
+a fixed date, so as real time passes "latest event is N days old" grows. It does
+not make /ready false and it is not a defect; it is the demo data being static.
+
+/metrics is Prometheus text format (aggregate counters only, no person-level
+data). PowerShell 5.1 needs -UseBasicParsing for non-HTML responses, otherwise
+Invoke-WebRequest throws a NullReferenceException on .Content:
+
+    (Invoke-WebRequest http://127.0.0.1:8000/metrics -UseBasicParsing).Content
+
+Verified on this machine: /health, /version, /ready and /metrics all answer via
+Invoke-RestMethod / Invoke-WebRequest -UseBasicParsing, and /ready reports
+ready=True with system.database=ok, data.artifacts=ok, data_quality=ok,
+model.ready=True across 5 checks.
+
+--------------------------------------------------------------------------------
+6b. Test suite and validators (from repository root, backend not required)
+--------------------------------------------------------------------------------
+    python -m pytest -q
+    # MEASURED ON THIS MACHINE (Windows, Python 3.13, 295 collected):
+    #   295 passed, 0 skipped, exit 0, ~87 s.
+    # Earlier in this audit the same suite reported 4 skips; those were
+    # precondition-dependent tests that now build what they need through the real
+    # endpoints instead of skipping. NOTE THE SIDE EFFECT: the red-team suite and
+    # verify_workflow_lifecycle.py drive demo cases through the state machine
+    # (SUPPORT_COMPLETED, CLOSED, follow-ups completed), so running them reduces
+    # the number of open cases the UI shows. Measured on the store after those
+    # suites: 173 open (114 HIGH, 59 MODERATE); on a pristine store: 183 open
+    # (118 HIGH, 65 MODERATE).
+    #
+    # To hand the demo back in a pristine state, IN THIS ORDER:
+    #   1. stop the backend (Ctrl+C in Terminal 1)
+    #   2. Remove-Item backend\fortify.db
+    #   3. start the backend again - it rebuilds all 183 cases from the
+    #      generated queue on startup
+    #   4. optional: python scripts\prepare_demo.py   (refreshes the hero-case
+    #      manifest against the rebuilt store)
+    #
+    # Step 4 BEFORE step 3 fails on purpose: with an empty store there is no open
+    # case, and prepare_demo refuses to invent a hero case to point the script at.
+
+The phase validators, in the order CI runs them:
+
+    python scripts\validate_synthetic_data.py --output data\generated --personnel 500 --days 180
+    python scripts\validate_features.py       --input data\generated\person_day_features.csv --personnel 500 --days 180
+    python scripts\validate_baselines.py      --input data\generated\person_day_features_baseline.csv
+    python scripts\validate_model.py
+    python scripts\validate_phase5_risk_layer.py
+    python scripts\validate_interventions.py  --input data\generated\intervention_recommendations.csv --report data\generated\intervention_generation_report.json
+    python scripts\validate_feasibility.py    --expected-rows 90000
+    python scripts\validate_security.py
+    python scripts\validate_workflow.py
+    python scripts\validate_dashboard.py
+    python scripts\validate_demo.py
+    python scripts\validate_hardening.py
+    python scripts\validate_product_experience.py
+    python scripts\validate_stitch_product.py
+
+Model validity probes (leakage / contamination / baseline comparison) and the
+alert-burden gate:
+
+    python scripts\validate_model_validity.py
+    python scripts\simulate_alert_fatigue.py
+
+Frontend typecheck + production build (from frontend\):
+
+    cd frontend
+    npm run build
+    cd ..
+
+--------------------------------------------------------------------------------
+6c. End-to-end acceptance and lifecycle (REQUIRES the backend running in Terminal 1)
+--------------------------------------------------------------------------------
+    python scripts\verify_acceptance.py
+    # MEASURED: 14/14 checks passed, ALL SCENARIOS AND SECURITY ATTEMPTS PASSED
+
+    python scripts\verify_workflow_lifecycle.py
+    # MEASURED: 20/20 checks passed, FULL WORKFLOW LIFECYCLE VERIFIED
+
+These talk to http://localhost:8000. If Terminal 1 is not running they fail with
+connection errors, not with product failures.
+
+--------------------------------------------------------------------------------
+6d. Backup and restore drill (optional, do not run during a demo)
+--------------------------------------------------------------------------------
+    python scripts\backup_restore_drill.py
+
+MEASURED: passes in about 3 seconds; verifies row counts, workflow history,
+audit-chain validity and constraint integrity after a real restore. It briefly
+restores the demo database from a snapshot - do not run it while someone is
+clicking through the UI.
+
+
+================================================================================
+7. STOPPING EVERYTHING
+================================================================================
+In each terminal press  Ctrl+C . Uvicorn prints "Shutting down" and exits; Vite
+exits immediately.
+
+To find and stop anything left holding a port:
+
+    Get-NetTCPConnection -LocalPort 8000 -ErrorAction SilentlyContinue |
+        Select-Object -ExpandProperty OwningProcess |
+        ForEach-Object { Get-Process -Id $_ }
+
+    Stop-Process -Name python -WhatIf     # preview first, then drop -WhatIf
+
+Prefer -WhatIf before you actually kill anything: it prints what WOULD be
+stopped. Do not use a blanket Stop-Process on node without checking, it will
+take down unrelated tooling.
+
+
+================================================================================
+8. TROUBLESHOOTING
+================================================================================
+8.1 "can't open file '...build_all.py'" or "'scripts' is not recognized"
+    You are in the wrong directory. These scripts must be run from the
+    REPOSITORY ROOT, not from backend\ or frontend\. Check with Get-Location;
+    `ls` should show README.md next to backend and frontend.
+
+8.2 Port 8000 already in use ("[Errno 10048] ... address already in use")
+    PREFERRED FIX: free the port (section 7) and stay on 8000. The Vite dev
+    server proxies /api and /health to 8000 by configuration, so with the proxy
+    path the browser only ever talks to one origin and nothing else must be set.
+
+    If you genuinely cannot use 8000, you must change TWO things, not one:
+
+        python -m uvicorn app.main:app --app-dir backend --port 8010 `
+            --host 127.0.0.1
+        cd frontend
+        $env:VITE_API_BASE_URL = "http://localhost:8010"
+        npm run dev
+
+    ...and the backend must be told to accept that browser origin, because once
+    you set VITE_API_BASE_URL the requests stop going through the proxy and
+    become cross-origin:
+
+        python -m uvicorn app.main:app --app-dir backend --port 8010 `
+            --host 127.0.0.1
+        # start it as, instead, setting the env first:
+        $env:FORTIFY_CORS_ORIGINS = "http://localhost:5173"
+
+    VERIFIED FAILURE IF YOU SKIP THAT: the frontend renders "We couldn't load
+    this view / Could not reach the FORTIFY backend" and the browser console shows
+    "blocked by CORS policy: Response to preflight request doesn't pass access
+    control check: No 'Access-Control-Allow-Origin' header". The API itself is
+    fine - curl to the same URL returns 200, which is exactly why this looks like
+    a backend bug and isn't. Set FORTIFY_CORS_ORIGINS to the origin the browser is
+    actually on (see 8.3 - it may not be 5173), and restart the backend.
+
+    Note the proxy in frontend\vite.config.ts is hardcoded to 8000 and has no
+    environment override, which is why moving ports forces you onto the
+    cross-origin route above.
+
+8.3 Port 5173 already in use
+    Vite prints a different port, e.g. "Local: http://localhost:5174/" and you
+    must open THAT address. Two consequences:
+      * If you keep the proxy (no VITE_API_BASE_URL), nothing else changes - the
+        proxy is server-side and the browser stays same-origin.
+      * If you ARE using VITE_API_BASE_URL, the browser origin is now 5174, so
+        FORTIFY_CORS_ORIGINS must include http://localhost:5174, not the default
+        5173. This combination fails confusingly if you forget it (see 8.2).
+    To force a specific port instead:  npm run dev -- --port 5173 --strictPort
+    (with --strictPort it refuses to start rather than silently moving, which is
+    easier to reason about during a demo).
+
+8.4 Activation blocked: "running scripts is disabled on this system"
+    PowerShell blocks the activate script by policy. Two options, least
+    invasive first - change only your own account's policy, and only if you
+    understand what RemoteSigned means on your machine:
+
+        Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
+
+    Or skip activation entirely; it is convenience, not a requirement:
+
+        python -m pip install -r backend\requirements.txt
+        python -m uvicorn app.main:app --app-dir backend --port 8000
+
+    Or call the batch shim from cmd.exe:  .\.venv\Scripts\activate.bat
+
+8.5 "ModuleNotFoundError: No module named 'fastapi'" (or uvicorn, pandas, ...)
+    You are using an interpreter that does not have the pinned packages. Run
+    `python -m pip install -r backend\requirements.txt`, and confirm you are in
+    the venv you created (`python -c "import sys; print(sys.executable)"`).
+
+8.6 The pages load but show no data, or a red error panel
+    In order of likelihood:
+      a. The backend is not running. Check http://127.0.0.1:8000/health .
+      b. The generated data is missing. Check http://127.0.0.1:8000/ready -
+         it names the missing artifacts. Fix: python scripts\build_all.py
+      c. You started the frontend from the wrong folder, so the /api proxy has
+         nothing to forward to. Start Vite from frontend\.
+      d. You are looking at a page that needs the AUDITOR role (Governance).
+         See the demo note in section 4. That panel is deliberate, not broken.
+
+8.7 "npm install" fails or hangs
+    Close VS Code's terminal, then in a plain PowerShell window:
+
+        cd frontend
+        Remove-Item -Recurse -Force node_modules, package-lock.json -ErrorAction SilentlyContinue
+        npm install
+        npm run build
+
+    package-lock.json is version-controlled; deleting it locally loses nothing
+    but determinism, so re-add it with `git checkout -- frontend/package-lock.json`
+    before committing anything.
+
+8.8 Database path problems ("unable to open database file")
+    The SQLite file lives at backend\fortify.db and is created on first run. The
+    location is resolved from the REPOSITORY ROOT, not your current directory,
+    which is why running from repo root is required. To put it elsewhere:
+
+        $env:FORTIFY_DATABASE_URL = "sqlite:///C:/some/dir/fortify.db"
+
+    It is gitignored - never commit a .db file. If a demo database is wedged,
+    stop the backend and delete backend\fortify.db; it rebuilds itself from the
+    generated queue on next start (you lose the demo's review decisions).
+
+8.9 /ready returns 503
+    Read the JSON: it separates the three layers and names the failure.
+
+      system.database not ok -> the DB is unreachable (permissions/path).
+      data.artifacts  not ok -> generated files missing -> python scripts\build_all.py
+      model.ready     false  -> model artifacts missing/incompatible -> re-run 2c,
+                                and see scripts\promote_model.py before assuming
+                                the model is "broken"; a stale registry can hold a
+                                model id whose files no longer exist.
+
+    The remedy string is printed for exactly this reason. Fix the named layer,
+    then re-check /ready; you do not need to restart the backend for data files
+    to be re-read.
+
+8.10 A validator printed a traceback ending in UnicodeEncodeError
+    If you hit this on this checkout, please report it - it was a known failure
+    class (a gate script containing a "->"-style arrow as a real Unicode arrow
+    character crashes when Python prints to a Windows cp1252 console) and is
+    fixed plus regression-gated in scripts\validate_hardening.py. The safe
+    workaround for any such script is:
+
+        $env:PYTHONIOENCODING = "utf-8"
+
+8.11 Everything looks fine but the demo numbers seem stale
+    The synthetic world is fixed-date and ends on the last generated day
+    (2026-06-29 for the standard 500 x 180-day build). "Updated <date>" on the
+    Attention page is the data day, not today. That is expected for a seeded
+    demonstration dataset.
+
+8.12 "No module named uvicorn" right after you created a venv
+    Two separate causes, both hit during this audit:
+
+    a) The venv is brand new and has no packages in it. Activating a venv does
+       NOT install anything. From the repository root, while the prompt shows
+       the venv name:
+
+           pip install -r backend\requirements.txt
+
+       Check what the interpreter actually is, because the prompt can lie:
+
+           python -c "import sys; print(sys.executable)"
+
+    b) A venv created in the WRONG FOLDER. `python -m venv .venv` makes one
+       relative to wherever you are, so running it from backend\ produces
+       backend\.venv, which VS Code may then auto-activate while you still need
+       to be at the repository root. Prefer one venv at the repository root and
+       create it from there. If you already made backend\.venv and want to stop
+       using it:  deactivate   then   Remove-Item -Recurse -Force backend\.venv
+
+    Either way the backend command must be started from the REPOSITORY ROOT -
+    `--app-dir backend` is resolved against your current directory, so running
+    it from inside backend\ looks for a non-existent backend\backend.
+
+8.13 The app is slow to respond, or the first page load crawls
+    Measured on this machine with warm caches, the API is fast: /health ~5 ms,
+    /api/dashboard/overview ~30-45 ms, /api/workflow/pending ~19 ms,
+    /api/dashboard/person/<id> ~45 ms, /ready ~560 ms (it re-audits data quality
+    on every call by design), and the Vite dev server serves modules in ~5-10 ms.
+
+    If it feels much slower than that, the cause is usually contention rather
+    than the application:
+      * `python scripts\build_all.py` rewrites roughly 447 MB. Running the
+        backend, the frontend, or a demo WHILE it regenerates is genuinely slow,
+        and the data endpoints can even see half-written artifacts. Let it finish.
+      * The full test suite, the validators, Docker builds and the pipeline all
+        read those same large CSVs; several at once saturates one disk.
+      * Windows Defender scans freshly written large CSVs and new Python
+        processes; the first run after a regeneration is the slowest.
+      * The first browser load pays Vite's on-demand transform of ~638 modules.
+        Later loads are cached and fast; `npm run build` proves the production
+        bundle is not affected.
+      * If this repository sits inside a OneDrive folder, syncing 447 MB of
+        changed files will dominate disk I/O. Pausing OneDrive during a
+        regeneration, or keeping the working copy outside the sync root, is the
+        practical fix.
+    Do not solve this by making the app poll less often or by caching results it
+    has to recompute; the numbers above show the request path is not the problem.
+
+
+================================================================================
+9. OPTIONAL: DOCKER (one command, but NOT the fast option)
+================================================================================
+Read this before choosing Docker over sections 3+4.
+
+docker-compose.yml defines THREE services, and the first one is the whole data
+pipeline:  pipeline  runs `python scripts/build_all.py` into named volumes and
+must complete successfully before  fortify-backend  starts, which must become
+healthy before  fortify-frontend  starts. So the FIRST `docker compose up
+--build` is two image builds PLUS the ~7-minute regeneration measured in 2c.
+Use the two-terminal path (sections 3 and 4) when you want a quick demo, and
+Docker when you want to prove the containerised stack.
+
+    docker compose up --build
+
+Then open http://localhost:5173 - nginx serves the built SPA and proxies /api
+and /health to the backend container (host port 8000). The workflow database
+inside the containers is at /app/data/runtime/fortify.db, NOT backend/fortify.db,
+because the image tree is read-only for the runtime user.
+
+Stop and remove the stack:
+
+    docker compose down
+
+To also discard the demo data and database volumes:  docker compose down -v
+
+VERIFICATION STATUS - the container path WAS executed on this machine:
+  * `docker build -f backend/Dockerfile  -t fortify-backend:local  .` -> exit 0,
+    image 788 MB.
+  * `docker build -f frontend/Dockerfile -t fortify-frontend:local frontend/`
+    -> exit 0, image 74.5 MB.
+  * Image hygiene, checked inside the running containers: backend runs as uid
+    10001 and contains NO generated CSVs and no .db/.zip; frontend contains no
+    node_modules.
+  * `docker compose up -d --build` -> exit 0. The pipeline container exited 0,
+    then fortify-backend and fortify-frontend both reached status "healthy".
+    The in-container regeneration is slower than the host run: watching the
+    pipeline logs, `generate_synthetic_data.py` took 32.5 s there and
+    `build_features.py` was still running at the 6-minute mark, so allow
+    noticeably more than the host's 7 minutes overall. (I did not capture the
+    container's own total - the logs go away with `docker compose down`.)
+  * Through the nginx proxy on http://localhost:5173 : SPA 200, /health 200 with
+    {"status":"ok","service":"FORTIFY","version":"0.2.0"},
+    /api/dashboard/overview WITHOUT credentials -> 401 (fails closed through the
+    proxy), /api/dashboard/overview with the welfare role+purpose -> 200.
+    Backend /ready on :8000 -> ready:true with system.database=ok,
+    data.artifacts=ok, data_quality=ok, model.ready=true.
+  * `docker compose down` -> exit 0. The three named volumes were left in place
+    (they existed before this verification); add -v only if you want them gone.
+  * One defect was found and fixed during this check: the pipeline service
+    inherited the backend image's HTTP healthcheck although it runs a batch job
+    and never binds a port, so a perfectly good run displayed as "unhealthy".
+    docker-compose.yml now disables that healthcheck for the pipeline service.
+
+
+================================================================================
+10. SECURITY NOTE - READ BEFORE YOU DEMO TO ANYONE OUTSIDE YOUR OWN MACHINE
+================================================================================
+* The prototype authenticates nothing. It trusts the X-Fortify-Role and
+  X-Fortify-Purpose request headers, and the frontend fills them from build-time
+  environment variables. Anyone who can reach the port can set them to anything.
+  This is a demonstration convenience, NOT access control.
+* Object-level unit scope IS enforced (see section 4) - but do not confuse the
+  two. Scope decides WHICH units' people a caller may touch; it does not decide
+  WHO the caller is. Because the role header is self-asserted, an attacker on the
+  network can simply claim a role and, under the default demo configuration, the
+  all-units permission. The scope check is real code and is tested; the identity
+  behind it is not. Never treat this as authorization for real personnel data.
+* The sidebar says "Not authenticated" and the Governance page reports the same.
+  That label is accurate. Do not describe this build as authenticated.
+* FORTIFY_AUTH_MODE=production is designed to fail closed (the app refuses to
+  start) until a real OIDC authenticator is registered. There is no identity
+  provider in this repository and none was fabricated for this guide.
+* Do not bind the dev server to 0.0.0.0, do not put it behind a public tunnel,
+  and do not share it with the network during a demo. 127.0.0.1 is used
+  throughout this file on purpose.
+* The audit chain uses an HMAC key stored beside the runtime data
+  (data/runtime/audit.jsonl.key). It is gitignored. It is a local demo key with
+  documented limits, not a production secret; see docs/PRODUCTION_READINESS.md.
+* The data is synthetic. No real personnel, unit or wellness records exist in
+  this repository, and the model's reported metrics do not establish real-world
+  predictive value.
+
+
+================================================================================
+11. SHORT ALTERNATIVE: macOS / Linux
+================================================================================
+Same sequence, different activation syntax. Not individually re-measured for
+this guide; CI runs the equivalent path on ubuntu-latest with Python 3.13 and
+Node 24.
+
+    python3 -m venv .venv
+    source .venv/bin/activate
+    pip install -r backend/requirements.txt
+    python scripts/build_all.py
+    python -m uvicorn app.main:app --app-dir backend --port 8000
+    # second terminal:
+    cd frontend && npm install && npm run dev
+
+--------------------------------------------------------------------------------
+END
+--------------------------------------------------------------------------------

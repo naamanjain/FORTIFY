@@ -13,6 +13,11 @@ artifacts/*
 *.db
 *.log
 
+# Hand-shared snapshots of this tree contain node_modules, caches, the demo
+# database and audit key material; they are evidence copies, never image input.
+AUDIT*.zip
+*.audit.zip
+
 # The frontend has its own build context (frontend/Dockerfile).
 frontend
 

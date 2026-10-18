@@ -31,14 +31,16 @@ from typing import Iterable
 
 from fastapi import Header, HTTPException
 
+from app.core.config import settings
 from app.security.audit import AuditEvent, AuditLog
 from app.security.principal import AuthenticationError, Authenticator, Principal, build_authenticator
+from app.security.rbac import UnitScope, resolve_unit_scope
 from app.security.security_config import AccessPurpose, SecurityRole
 
 # Resolved once at import from FORTIFY_AUTH_MODE. Production mode with no real
 # identity provider raises here (fail closed at startup) rather than serving
 # requests on header trust.
-_AUTHENTICATOR: Authenticator = build_authenticator(os.getenv("FORTIFY_AUTH_MODE", "demo"))
+_AUTHENTICATOR: Authenticator = build_authenticator(settings.auth_mode)
 
 # Which purpose each view class demands.
 VIEW_PURPOSE: dict[str, AccessPurpose] = {
@@ -180,6 +182,102 @@ def require_audit(principal: Principal, resource: str, audit_path=None) -> None:
 
 def require_infrastructure(principal: Principal, resource: str, audit_path=None) -> None:
     authorize_view(principal, "infrastructure", resource, audit_path)
+
+
+def unit_scope_for(principal: Principal) -> UnitScope:
+    """Object-level scope for this caller. Never inferred from an empty set.
+
+    Read per request rather than cached at import so the scope a deployment
+    grants is always the one currently configured, and so tests can exercise
+    every scope branch without restarting the process.
+    """
+    return resolve_unit_scope(
+        authenticated=principal.authenticated,
+        claim_scope=principal.unit_scope,
+        auth_mode=os.getenv("FORTIFY_AUTH_MODE", settings.auth_mode),
+        demo_scope_value=os.getenv("FORTIFY_DEMO_UNIT_SCOPE", settings.demo_unit_scope),
+    )
+
+
+def scope_denial_detail(not_found_message: str) -> str:
+    """Refusal text for an out-of-scope object.
+
+    Callers MUST pass the exact message their not-found branch uses. A distinct
+    "exists but is not yours" response turns the 403/404 pair into an
+    enumeration oracle for person identifiers.
+    """
+    return not_found_message
+
+
+def require_unit_access(
+    principal: Principal,
+    unit_id: str | None,
+    resource: str,
+    view: str,
+    audit_path=None,
+    *,
+    not_found_message: str = "Not found.",
+) -> None:
+    """Allow a person-level read/write only inside the caller's unit scope.
+
+    Denies when the scope is empty, unconfigured, malformed or unknown, and when
+    the person's unit cannot be resolved at all.
+    """
+    scope = unit_scope_for(principal)
+    allowed = scope.allows(unit_id)
+    if audit_path is not None:
+        _record_scope_decision(principal, unit_id, resource, view, allowed, audit_path)
+    if not allowed:
+        raise HTTPException(status_code=404, detail=scope_denial_detail(not_found_message))
+
+
+def require_units_in_scope(principal: Principal, unit_ids: Iterable[str], resource: str, view: str, audit_path=None) -> None:
+    """Same policy for endpoints that name a set of units up front."""
+    scope = unit_scope_for(principal)
+    requested = [str(u) for u in unit_ids]
+    allowed = scope.all_units or all(scope.allows(u) for u in requested)
+    if audit_path is not None:
+        _record_scope_decision(principal, ",".join(sorted(set(requested)))[:200], resource, view, allowed, audit_path)
+    if not allowed:
+        raise HTTPException(status_code=404, detail=scope_denial_detail(view))
+
+
+def _record_scope_decision(
+    principal: Principal,
+    unit_id: str | None,
+    resource: str,
+    view: str,
+    allowed: bool,
+    audit_path,
+) -> None:
+    """Audit the scope decision, allowing and denying alike.
+
+    Deliberately narrow detail: unit id, view and scope provenance. No person
+    identifier, score, or case content is ever written here.
+    """
+    try:
+        AuditLog(audit_path).append(AuditEvent(
+            event_type="ACCESS_CONTROL",
+            actor_role=principal.role.value,
+            purpose=principal.purpose.value,
+            outcome="ALLOWED" if allowed else "DENIED",
+            resource=resource,
+            timestamp=_utc_now(),
+            details={
+                "view": view,
+                "layer": "unit_scope",
+                "unit": str(unit_id) if unit_id is not None else None,
+                "auth_method": principal.auth_method,
+                "authenticated": principal.authenticated,
+                **unit_scope_for(principal).describe(),
+            },
+        ))
+    except Exception:  # noqa: BLE001 - a logging fault must not become an outage
+        from app.observability import METRICS
+        METRICS.increment("audit_write_failures_total")
+        logging.getLogger("fortify").warning(
+            "audit_write_failed", extra={"view": view, "outcome": "ALLOWED" if allowed else "DENIED"}
+        )
 
 
 def principal_from_role_purpose(role: str, purpose: str, audit_path=None, resource: str = "service") -> Principal:

@@ -17,14 +17,49 @@ from app.core.config import settings
 from app.core.database import begin_write, column_exists, is_sqlite, lock_rows, resolve_sqlite_url
 from app.core.paths import AUDIT_PATH, DATA_DIR
 from app.security.audit import AuditEvent, AuditLog
-from app.security.rbac import authorize
+from app.security.rbac import authorize, UnitScope
 from app.security.security_config import AccessPurpose, SecurityRole
+
+# Scope for rows a caller may touch. ``None`` is never permissive: a workflow
+# function called without a stated scope is a programming error, not an open
+# request, so it denies rather than defaults.
+_MISSING_SCOPE = "A unit scope is required to access workflow cases."
+
+
+def _scope_predicate(scope: UnitScope | None, column: str = "unit_id") -> tuple[str, list[str]]:
+    """SQL fragment that restricts rows to ``scope`` before any LIMIT is applied."""
+    if scope is None:
+        raise PermissionError(_MISSING_SCOPE)
+    if scope.all_units:
+        return "", []
+    if not scope.units:
+        return " AND 1 = 0", []
+    units = sorted(scope.units)
+    return " AND " + column + " IN (" + ",".join("?" for _ in units) + ")", units
+
+
+def _check_row_scope(scope: UnitScope | None, row: Any) -> None:
+    """Object-level check on a loaded case row.
+
+    Called inside the same transaction as the write, so a case that moved units
+    between the caller's read and their mutation cannot be edited through a
+    stale scope. Denied as not-found: an out-of-scope case id must not confirm
+    that the case exists.
+    """
+    if scope is None:
+        raise PermissionError(_MISSING_SCOPE)
+    unit_id = row["unit_id"] if "unit_id" in row.keys() else None
+    if not scope.allows(str(unit_id) if unit_id is not None else None):
+        raise KeyError("Workflow item not found")
 
 WORKFLOW_STATES = {
     "NEW", "ACKNOWLEDGED", "IN_REVIEW", "SUPPORT_PLANNED", "SUPPORT_COMPLETED",
     "FOLLOW_UP_SCHEDULED", "FOLLOW_UP_DUE", "FOLLOW_UP_COMPLETED", "CLOSED",
     "COMPLETED", "DEFERRED", "DISMISSED",
 }
+# States that still expect a human decision. Single definition so the queue
+# endpoint and the per-person lookup cannot drift apart.
+PENDING_STATES = ("NEW", "ACKNOWLEDGED", "IN_REVIEW", "SUPPORT_PLANNED", "DEFERRED")
 ALLOWED_ACTIONS = {
     "WELLNESS_CHECK_IN", "RECOVERY_SUPPORT", "SUPERVISOR_WELFARE_REVIEW",
     "PRIORITY_WELFARE_REVIEW", "HUMAN_ESCALATION_RECOMMENDED", "ROUTINE_MONITORING",
@@ -109,11 +144,6 @@ def _audit_path() -> Path:
     return AUDIT_PATH
 
 
-def _ensure_column(conn: Any, table: str, column: str, definition: str) -> None:
-    if not column_exists(conn, table, column):
-        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
-
-
 def initialize_workflow_store() -> None:
     if is_sqlite():
         # PostgreSQL locations are managed by the database server; only the
@@ -125,70 +155,13 @@ def initialize_workflow_store() -> None:
         conn.execute(
             "CREATE TABLE IF NOT EXISTS system_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
         )
-        conn.execute("""CREATE TABLE IF NOT EXISTS workflow_items (
-            workflow_item_id TEXT PRIMARY KEY, person_id TEXT NOT NULL, recommendation_date TEXT NOT NULL,
-            risk_band TEXT NOT NULL, recommended_action TEXT NOT NULL, priority TEXT NOT NULL,
-            feasibility_status TEXT NOT NULL, constraint_flags TEXT NOT NULL, rationale TEXT NOT NULL,
-            requires_human_review INTEGER NOT NULL, model_version TEXT NOT NULL, policy_version TEXT NOT NULL,
-            feasibility_policy_version TEXT NOT NULL, workflow_state TEXT NOT NULL,
-            last_transition_at TEXT, last_actor_role TEXT, last_reason_code TEXT)""")
-        conn.execute("""CREATE TABLE IF NOT EXISTS workflow_audit_events (
-            event_id TEXT PRIMARY KEY, workflow_item_id TEXT NOT NULL, person_id TEXT NOT NULL,
-            recommendation_date TEXT NOT NULL, previous_state TEXT NOT NULL, new_state TEXT NOT NULL,
-            actor_role TEXT NOT NULL, purpose TEXT NOT NULL, timestamp TEXT NOT NULL, reason_code TEXT NOT NULL,
-            model_version TEXT NOT NULL, policy_version TEXT NOT NULL, feasibility_policy_version TEXT NOT NULL,
-            workflow_policy_version TEXT NOT NULL,
-            FOREIGN KEY (workflow_item_id) REFERENCES workflow_items(workflow_item_id))""")
-        conn.execute("""CREATE TABLE IF NOT EXISTS workflow_support_events (
-            support_event_id TEXT PRIMARY KEY, workflow_item_id TEXT NOT NULL, person_id TEXT NOT NULL,
-            support_action TEXT NOT NULL, completed_at TEXT NOT NULL, actor_role TEXT NOT NULL,
-            FOREIGN KEY (workflow_item_id) REFERENCES workflow_items(workflow_item_id))""")
-        conn.execute("""CREATE TABLE IF NOT EXISTS workflow_feedback (
-            feedback_id TEXT PRIMARY KEY, workflow_item_id TEXT NOT NULL, support_event_id TEXT NOT NULL,
-            person_id TEXT NOT NULL, helpfulness INTEGER NOT NULL, comment TEXT,
-            follow_up_requested INTEGER NOT NULL, submitted_at TEXT NOT NULL, recorded_by_role TEXT NOT NULL,
-            idempotency_key TEXT,
-            FOREIGN KEY (workflow_item_id) REFERENCES workflow_items(workflow_item_id),
-            FOREIGN KEY (support_event_id) REFERENCES workflow_support_events(support_event_id))""")
-        conn.execute("""CREATE TABLE IF NOT EXISTS workflow_followups (
-            followup_id TEXT PRIMARY KEY, workflow_item_id TEXT NOT NULL, support_event_id TEXT NOT NULL,
-            person_id TEXT NOT NULL, scheduled_for TEXT NOT NULL, status TEXT NOT NULL,
-            created_at TEXT NOT NULL, created_by_role TEXT NOT NULL, last_updated_at TEXT NOT NULL,
-            completed_at TEXT, completed_by_role TEXT,
-            FOREIGN KEY (workflow_item_id) REFERENCES workflow_items(workflow_item_id),
-            FOREIGN KEY (support_event_id) REFERENCES workflow_support_events(support_event_id))""")
-        # Safe migrations for databases created before these columns existed.
-        _ensure_column(conn, "workflow_items", "support_completed_at", "TEXT")
-        _ensure_column(conn, "workflow_items", "support_completed_by_role", "TEXT")
-        _ensure_column(conn, "workflow_items", "active_support_event_id", "TEXT")
-        _ensure_column(conn, "workflow_items", "active_followup_id", "TEXT")
-        _ensure_column(conn, "workflow_items", "feedback_submitted", "INTEGER NOT NULL DEFAULT 0")
-        _ensure_column(conn, "workflow_items", "unit_id", "TEXT")
-        _ensure_column(conn, "workflow_feedback", "idempotency_key", "TEXT")
-        # Historical databases may contain duplicate feedback rows written by
-        # retried requests before this constraint existed. Keep the earliest
-        # submission for each support event - that is the one recorded at the
-        # time of the conversation - and drop the later duplicates, then
-        # enforce one-row-per-event at the database level.
-        duplicate_groups = conn.execute(
-            """SELECT COUNT(*) FROM (
-                   SELECT 1 FROM workflow_feedback
-                   GROUP BY workflow_item_id, support_event_id HAVING COUNT(*) > 1
-               )"""
-        ).fetchone()[0]
-        if duplicate_groups:
-            conn.execute(
-                """DELETE FROM workflow_feedback WHERE feedback_id NOT IN (
-                       SELECT MIN(feedback_id) FROM workflow_feedback
-                       GROUP BY workflow_item_id, support_event_id
-                   )"""
-            )
-        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_workflow_feedback_event ON workflow_feedback(workflow_item_id, support_event_id)")
-        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_workflow_feedback_idem ON workflow_feedback(idempotency_key) WHERE idempotency_key IS NOT NULL")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_workflow_items_pending ON workflow_items(workflow_state, recommendation_date, priority, workflow_item_id)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_workflow_audit_item ON workflow_audit_events(workflow_item_id, timestamp, event_id)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_workflow_followups_status ON workflow_followups(status, scheduled_for, followup_id)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_workflow_feedback_item ON workflow_feedback(workflow_item_id, submitted_at, feedback_id)")
+        # Schema is owned by the versioned migration runner: idempotent,
+        # recorded, and shared verbatim with the PostgreSQL path.
+        from app.core.migrations import run_migrations
+
+        applied = run_migrations(conn)
+        if applied:
+            logging.getLogger("fortify").info("schema_migrated", extra={"versions": applied})
         conn.commit()
 
 
@@ -358,31 +331,63 @@ def _trend_lookup() -> dict[tuple[str, str], str]:
         return lookup
 
 
-def list_items(*, pending_only: bool = True, limit: int = 50) -> list[dict[str, Any]]:
+def list_items(*, pending_only: bool = True, limit: int = 50, unit_scope: UnitScope | None = None) -> list[dict[str, Any]]:
     ensure_workflow_items(); limit = max(1, min(limit, 200)); trend_lookup = _trend_lookup()
+    scope_sql, scope_params = _scope_predicate(unit_scope)
     with _connection() as conn:
         _as_rows(conn)
-        states = "'NEW','ACKNOWLEDGED','IN_REVIEW','SUPPORT_PLANNED','DEFERRED'"
-        sql = f"SELECT * FROM workflow_items WHERE workflow_state IN ({states})" if pending_only else "SELECT * FROM workflow_items"
+        states = ",".join(f"'{state}'" for state in PENDING_STATES)
+        sql = f"SELECT * FROM workflow_items WHERE workflow_state IN ({states})" if pending_only else "SELECT * FROM workflow_items WHERE 1=1"
+        sql += scope_sql
         sql += " ORDER BY recommendation_date DESC, CASE priority WHEN 'HIGH' THEN 0 WHEN 'MEDIUM' THEN 1 WHEN 'LOW' THEN 2 ELSE 3 END, workflow_item_id LIMIT ?"
-        rows = conn.execute(sql, (limit,)).fetchall()
+        rows = conn.execute(sql, (*scope_params, limit)).fetchall()
     items = [_row_to_dict(r) for r in rows]
     for item in items: item["trend"] = trend_lookup.get((str(item["person_id"]), str(item["date"])), "STABLE")
     return items
 
 
-def get_item(workflow_item_id: str) -> dict[str, Any] | None:
+def get_item(workflow_item_id: str, *, unit_scope: UnitScope | None = None) -> dict[str, Any] | None:
     ensure_workflow_items()
+    if unit_scope is None:
+        raise PermissionError(_MISSING_SCOPE)
     with _connection() as conn:
         _as_rows(conn)
         row = conn.execute("SELECT * FROM workflow_items WHERE workflow_item_id = ?", (workflow_item_id,)).fetchone()
         if not row: return None
+        # Out-of-scope reads report the same absence as unknown ids.
+        if not unit_scope.allows(str(row["unit_id"]) if row["unit_id"] is not None else None):
+            return None
         item = _row_to_dict(row)
     item["history"] = get_history(workflow_item_id)
     item["support_event"] = get_support_event(workflow_item_id)
     item["feedback"] = get_feedback(workflow_item_id)
     item["followup"] = get_followup(workflow_item_id)
     return item
+
+
+def open_case_id_for_person(person_id: str, unit_scope: UnitScope | None = None) -> str | None:
+    """The most recent case for this person that still expects a human decision.
+
+    A case is opened on the day the alert policy created it and then stays open
+    for days or weeks, so a profile bound only to the newest data day reported
+    "no case" for every person whose case was opened earlier.
+
+    Scope is applied in the query: an officer must not learn that some other
+    unit's person has an open case, not even through a bare id.
+    """
+    ensure_workflow_items()
+    if unit_scope is None:
+        raise PermissionError(_MISSING_SCOPE)
+    placeholders = ",".join("?" for _ in PENDING_STATES)
+    scope_sql, scope_params = _scope_predicate(unit_scope)
+    with _connection() as conn:
+        row = conn.execute(
+            f"SELECT workflow_item_id FROM workflow_items WHERE person_id = ?"
+            f" AND workflow_state IN ({placeholders}){scope_sql}"
+            " ORDER BY recommendation_date DESC, workflow_item_id LIMIT 1",
+            (person_id, *PENDING_STATES, *scope_params),
+        ).fetchone()
+    return str(row[0]) if row else None
 
 
 def get_history(workflow_item_id: str) -> list[dict[str, Any]]:
@@ -450,7 +455,8 @@ def _write_external_audit(event_type: str, actor_role: str, purpose: str, outcom
 
 def transition_item(workflow_item_id: str, *, new_state: str, actor_role: str, purpose: str, reason_code: str,
                     config: WorkflowPolicyConfig | None = None,
-                    expected_state: str | None = None) -> dict[str, Any]:
+                    expected_state: str | None = None,
+                    unit_scope: UnitScope | None = None) -> dict[str, Any]:
     config = config or WorkflowPolicyConfig(); _authorize_transition(actor_role, purpose, config)
     if new_state not in WORKFLOW_STATES: raise ValueError(f"Unknown workflow state: {new_state}")
     if not reason_code.strip(): raise ValueError("reason_code is required for workflow transitions")
@@ -468,6 +474,9 @@ def transition_item(workflow_item_id: str, *, new_state: str, actor_role: str, p
         else:
             row = result
         if not row: raise KeyError("Workflow item not found")
+        # Re-checked here, on the locked row, not from anything the client sent:
+        # this is the point where a stale or forged scope stops being able to write.
+        _check_row_scope(unit_scope, row)
         current = str(row["workflow_state"])
         # Stale-client guard: a client that loaded the case before someone else
         # moved it must not overwrite their decision with its own.
@@ -497,7 +506,7 @@ def transition_item(workflow_item_id: str, *, new_state: str, actor_role: str, p
                           {"event_id":event_id,"workflow_item_id":workflow_item_id,"person_id":person_id,"recommendation_date":recommendation_date,
                            "previous_state":current,"new_state":new_state,"reason_code":reason_code,"model_version":model_version,
                            "policy_version":policy_version,"feasibility_policy_version":feasibility_policy_version,"workflow_policy_version":config.workflow_policy_version})
-    return get_item(workflow_item_id) or {}
+    return get_item(workflow_item_id, unit_scope=unit_scope) or {}
 
 
 def _require_welfare_actor(actor_role: str, purpose: str) -> None:
@@ -508,7 +517,8 @@ def _require_welfare_actor(actor_role: str, purpose: str) -> None:
 
 
 def record_feedback(workflow_item_id: str, *, helpfulness: int, comment: str | None, follow_up_requested: bool,
-                    actor_role: str, purpose: str, idempotency_key: str | None = None) -> dict[str, Any]:
+                    actor_role: str, purpose: str, idempotency_key: str | None = None,
+                    unit_scope: UnitScope | None = None) -> dict[str, Any]:
     """Record one piece of personnel feedback for a support event.
 
     Feedback is the outcome measurement for the welfare loop, so a retried
@@ -522,7 +532,9 @@ def record_feedback(workflow_item_id: str, *, helpfulness: int, comment: str | N
     """
     _require_welfare_actor(actor_role, purpose); ensure_workflow_items()
     if not 1 <= helpfulness <= 5: raise ValueError("helpfulness must be between 1 and 5")
-    item = get_item(workflow_item_id)
+    # Scope is enforced on the load: an out-of-scope case reads as absent, so a
+    # feedback attempt cannot probe another unit's caseload.
+    item = get_item(workflow_item_id, unit_scope=unit_scope)
     if not item: raise KeyError("Workflow item not found")
     support = item.get("support_event")
     if not support: raise ValueError("Personnel feedback requires recorded support completion.")
@@ -537,7 +549,7 @@ def record_feedback(workflow_item_id: str, *, helpfulness: int, comment: str | N
                 (idempotency_key, workflow_item_id),
             ).fetchone()
         if prior is not None:
-            return get_item(workflow_item_id) or {}
+            return get_item(workflow_item_id, unit_scope=unit_scope) or {}
 
     now = datetime.now(timezone.utc).isoformat()
     fid = f"FB-{hashlib.sha256(f'{workflow_item_id}|{now}'.encode()).hexdigest()[:20]}"
@@ -552,22 +564,23 @@ def record_feedback(workflow_item_id: str, *, helpfulness: int, comment: str | N
             conn.rollback()
             # Lost a race with a concurrent identical submission: treat the
             # stored record as authoritative rather than writing a duplicate.
-            return get_item(workflow_item_id) or {}
+            return get_item(workflow_item_id, unit_scope=unit_scope) or {}
         conn.execute("UPDATE workflow_items SET feedback_submitted=1 WHERE workflow_item_id=?", (workflow_item_id,))
         conn.commit()
     _write_external_audit("WORKFLOW_FEEDBACK_RECORDED", actor_role, purpose, "ALLOWED", f"/api/workflow/{workflow_item_id}/feedback",
                           {"feedback_id":fid,"workflow_item_id":workflow_item_id,"person_id":item["person_id"],"support_event_id":support_event_id,"follow_up_requested":bool(follow_up_requested)})
-    return get_item(workflow_item_id) or {}
+    return get_item(workflow_item_id, unit_scope=unit_scope) or {}
 
 
-def schedule_followup(workflow_item_id: str, scheduled_for: str, actor_role: str, purpose: str) -> dict[str, Any]:
+def schedule_followup(workflow_item_id: str, scheduled_for: str, actor_role: str, purpose: str,
+                      unit_scope: UnitScope | None = None) -> dict[str, Any]:
     _require_welfare_actor(actor_role, purpose); ensure_workflow_items()
     try:
         when = datetime.fromisoformat(scheduled_for.replace("Z", "+00:00"))
     except ValueError as exc:
         raise ValueError("scheduled_for must be an ISO-8601 datetime") from exc
     if when.tzinfo is None: raise ValueError("scheduled_for must include a timezone")
-    item = get_item(workflow_item_id)
+    item = get_item(workflow_item_id, unit_scope=unit_scope)
     if not item: raise KeyError("Workflow item not found")
     if item["workflow_state"] not in {"SUPPORT_COMPLETED", "FOLLOW_UP_SCHEDULED", "FOLLOW_UP_DUE"}:
         raise ValueError("Follow-up can only be scheduled after support completion.")
@@ -602,11 +615,13 @@ def schedule_followup(workflow_item_id: str, scheduled_for: str, actor_role: str
         conn.commit()
     _write_external_audit("WORKFLOW_FOLLOWUP", actor_role, purpose, "ALLOWED", f"/api/workflow/{workflow_item_id}/follow-up",
                           {"workflow_item_id":workflow_item_id,"person_id":item["person_id"],"followup_id":followup_id,"scheduled_for":when.astimezone(timezone.utc).isoformat(),"reason_code":reason,"event_id":event_id})
-    return get_item(workflow_item_id) or {}
+    return get_item(workflow_item_id, unit_scope=unit_scope) or {}
 
 
-def list_followups(status: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+def list_followups(status: str | None = None, limit: int = 100,
+                   unit_scope: UnitScope | None = None) -> list[dict[str, Any]]:
     ensure_workflow_items(); limit = max(1, min(limit, 200)); now = datetime.now(timezone.utc)
+    scope_sql, scope_params = _scope_predicate(unit_scope, "w.unit_id")
     with _connection() as conn:
         _as_rows(conn)
         rows = conn.execute("""SELECT f.*, w.risk_band, w.recommended_action, w.priority, w.feasibility_status,
@@ -621,7 +636,8 @@ def list_followups(status: str | None = None, limit: int = 100) -> list[dict[str
                        ROW_NUMBER() OVER (PARTITION BY workflow_item_id ORDER BY submitted_at DESC, feedback_id DESC) AS rn
                 FROM workflow_feedback
             ) fb ON fb.workflow_item_id = f.workflow_item_id AND fb.rn = 1
-            ORDER BY f.scheduled_for ASC, f.followup_id ASC LIMIT ?""", (limit,)).fetchall()
+            WHERE 1 = 1""" + scope_sql + """
+            ORDER BY f.scheduled_for ASC, f.followup_id ASC LIMIT ?""", (*scope_params, limit)).fetchall()
     out: list[dict[str, Any]] = []
     for r in rows:
         scheduled = datetime.fromisoformat(str(r["scheduled_for"]).replace("Z", "+00:00"))
@@ -641,23 +657,28 @@ def list_followups(status: str | None = None, limit: int = 100) -> list[dict[str
     return out
 
 
-def complete_followup(followup_id: str, actor_role: str, purpose: str) -> dict[str, Any]:
+def complete_followup(followup_id: str, actor_role: str, purpose: str,
+                      unit_scope: UnitScope | None = None) -> dict[str, Any]:
     _require_welfare_actor(actor_role, purpose); ensure_workflow_items(); now=datetime.now(timezone.utc).isoformat()
     with _connection() as conn:
         _as_rows(conn)
         conn.execute("BEGIN IMMEDIATE")
         row=conn.execute("""SELECT f.status AS followup_status, f.person_id AS fu_person_id,
             w.workflow_item_id AS wi_id, w.workflow_state AS wi_state, w.recommendation_date AS wi_date,
+            w.unit_id AS wi_unit_id,
             w.model_version AS wi_model_version, w.policy_version AS wi_policy_version,
             w.feasibility_policy_version AS wi_feasibility_policy_version
             FROM workflow_followups f JOIN workflow_items w ON w.workflow_item_id=f.workflow_item_id
             WHERE f.followup_id=?""",(followup_id,)).fetchone()
         if not row: raise KeyError("Follow-up not found")
+        # Checked on the locked row, inside this transaction.
+        if unit_scope is None or not unit_scope.allows(str(row["wi_unit_id"]) if row["wi_unit_id"] is not None else None):
+            raise KeyError("Follow-up not found")
         workflow_id=row["wi_id"]; current=row["wi_state"]
         if row["followup_status"] == "COMPLETED":
             # A retried completion is a successful replay, not an error: the
             # caller asked for the state it is already in.
-            return get_item(workflow_id) or {}
+            return get_item(workflow_id, unit_scope=unit_scope) or {}
         if current not in {"FOLLOW_UP_SCHEDULED","FOLLOW_UP_DUE"}: raise ValueError("Workflow is not in a follow-up state.")
         conn.execute("UPDATE workflow_followups SET status='COMPLETED',completed_at=?,completed_by_role=?,last_updated_at=? WHERE followup_id=?",(now,actor_role,now,followup_id))
         conn.execute("UPDATE workflow_items SET workflow_state='FOLLOW_UP_COMPLETED',last_transition_at=?,last_actor_role=?,last_reason_code=? WHERE workflow_item_id=?",(now,actor_role,"FOLLOW_UP_COMPLETED_BY_HUMAN",workflow_id))
@@ -668,4 +689,4 @@ def complete_followup(followup_id: str, actor_role: str, purpose: str) -> dict[s
         person_id = row["fu_person_id"]
     _write_external_audit("WORKFLOW_FOLLOWUP_COMPLETED", actor_role, purpose, "ALLOWED", f"/api/workflow/{workflow_id}/follow-up",
                           {"event_id":event_id,"workflow_item_id":workflow_id,"person_id":person_id,"followup_id":followup_id})
-    return get_item(workflow_id) or {}
+    return get_item(workflow_id, unit_scope=unit_scope) or {}

@@ -52,6 +52,22 @@ jobs:
           fi
           echo "No regenerable artifacts tracked."
 
+  docker-build:
+    name: Docker build (both images, no push)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build backend image
+        run: docker build -f backend/Dockerfile -t fortify-backend:ci .
+      - name: Build frontend image
+        run: docker build -f frontend/Dockerfile -t fortify-frontend:ci frontend/
+      - name: Verify images are clean
+        run: |
+          # No datasets, no node_modules, non-root runtime.
+          docker run --rm --entrypoint sh fortify-backend:ci             -c 'id -u | grep -qx 10001 && ! ls /app/data/generated/*.csv >/dev/null 2>&1 && echo backend-clean'
+          docker run --rm --entrypoint sh fortify-frontend:ci             -c '! test -d /app/node_modules && echo frontend-clean'
+
   frontend-build:
     name: Frontend typecheck + build (Node 24)
     runs-on: ubuntu-latest
@@ -146,6 +162,23 @@ jobs:
         # Included in the pytest run above via test_explanation_fidelity.py;
         # re-asserted here explicitly so the gate is visible in the job log.
         run: pytest backend/tests/test_explanation_fidelity.py backend/tests/test_alert_policy.py -q
+
+      - name: Red-team and privacy-surface gates
+        # The red-team campaign and per-role privacy surfaces must hold; the
+        # red-team evidence report is published with the run.
+        run: |
+          pytest backend/tests/test_red_team.py backend/tests/test_privacy_surface.py backend/tests/test_oidc.py backend/tests/test_auth_modes.py -q --red-team-report
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          report = json.loads(Path("artifacts/red_team/red_team_report.json").read_text())
+          if report["failed"]:
+              raise SystemExit(f"RED-TEAM GATE FAILED: {report['failed']} attacks breached")
+          # Skipped attacks are coverage gaps, not breaches, but they must be
+          # visible: an attack that never ran proved nothing.
+          print(f"Red-team gate OK: {report['passed']}/{report['total']} attacks held, "
+                f"{report.get('not_executed', 0)} NOT EXECUTED (data-dependent skips)")
+          PY
 
       - name: Upload regenerated artifacts for inspection
         if: always()

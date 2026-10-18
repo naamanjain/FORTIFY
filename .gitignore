@@ -40,6 +40,10 @@ artifacts/*
 
 # ── Runtime state (SQLite workflow database, audit log) — never commit ────────
 data/runtime/
+# A second audit chain was briefly written here by an earlier promote_model path.
+# The files are kept on disk as evidence of that split, but runtime state must
+# never enter the repository - the log and its anchor are as sensitive as the key.
+backend/data/
 *.db
 *.db-journal
 *.db-wal
@@ -56,6 +60,13 @@ data/runtime/
 *.p12
 *.pfx
 *.keystore
+
+# ── Snapshot archives handed around by hand ──────────────────────────────────
+# An audit snapshot of this tree was shared as a zip containing node_modules,
+# __pycache__, the SQLite workflow database and audit HMAC key material. It is
+# an evidence copy, never a source of truth, and must not enter the repository.
+AUDIT*.zip
+*.audit.zip
 
 # ── Logs, temporary files, OS/editor noise ───────────────────────────────────
 *.log

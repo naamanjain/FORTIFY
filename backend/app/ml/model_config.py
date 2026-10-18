@@ -40,8 +40,15 @@ class ModelConfig:
     test_fraction: float = 0.20
     random_state: int = 42
     min_training_samples: int = 100
-    max_iter: int = 1000
+    max_iter: int = 5000
     class_weight: str | None = "balanced"
+    # Convergence tolerance for liblinear. The sklearn default (1e-4) stops the
+    # descent while the solution is still ~1e-3 away from the unique optimum of
+    # this strictly convex problem, so two platforms can settle on two different
+    # "converged" models and disagree on risk bands near 0.33/0.66. Demanding a
+    # far tighter optimum is what makes the fitted model reproducible, not a
+    # rounding hack to force counts to match.
+    tolerance: float = 1e-10
     risk_thresholds: tuple[float, float] = field(default_factory=lambda: (0.33, 0.66))
 
     def __post_init__(self) -> None:
@@ -49,6 +56,8 @@ class ModelConfig:
             raise ValueError("target_horizon_days must be >= 1")
         if not 1 <= self.target_threshold <= 5:
             raise ValueError("target_threshold must be between 1 and 5")
+        if not 0 < self.tolerance < 1:
+            raise ValueError("tolerance must be strictly between 0 and 1")
         if abs(self.train_fraction + self.validation_fraction + self.test_fraction - 1.0) > 1e-9:
             raise ValueError("train/validation/test fractions must sum to 1")
         if self.min_training_samples < 1:

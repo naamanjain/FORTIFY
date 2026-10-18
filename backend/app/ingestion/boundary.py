@@ -50,6 +50,25 @@ FIELD_RANGES: dict[str, tuple[float | None, float | None]] = {
     "night_shift": (0.0, 1.0),
 }
 
+# Ingestion contract version per dataset. A source system declaring a
+# different SCHEMA_VERSION is refused rather than best-effort parsed: silent
+# schema drift is how "temporary" integration hacks become permanent.
+SCHEMA_VERSIONS: dict[str, int] = {
+    "duty_events": 1, "recovery_events": 1, "incident_events": 1,
+    "training_events": 1, "wellness_events": 1, "leave_events": 1,
+    "deployment_events": 1,
+}
+
+# Closed vocabularies: unexpected categorical values are faults, not novelty.
+CATEGORICAL_VALUES: dict[str, dict[str, set[str]]] = {
+    "duty_events": {"duty_type": {"DAY", "NIGHT", "EMERGENCY", "PATROL", "ADMIN", "TRAINING_SUPPORT"}},
+    "leave_events": {"leave_type": {"ANNUAL", "CASUAL", "SPECIAL", "REST"},
+                     "status": {"APPROVED", "COMPLETED", "PENDING"}},
+    "incident_events": {"incident_type": {"ROUTINE_OPERATION", "HIGH_INTENSITY_OPERATION",
+                                          "EMERGENCY_RESPONSE", "EXTENDED_OPERATION"}},
+    "training_events": {"training_type": {"TACTICAL", "FITNESS", "PROCEDURAL", "SKILL", "REFRESHER"}},
+}
+
 DATASET_SCHEMAS: dict[str, dict[str, set[str]]] = {
     "duty_events": {"required": {"duty_event_id", "person_id", "date", "duration_hours"},
                     "optional": {"timestamp", "duty_type", "night_shift", "intensity_level", "deployment_id"}},
@@ -113,6 +132,7 @@ def validate_batch(
     known_latest_date: date | None = None,
     max_age_days: int = 14,
     today: date | None = None,
+    schema_version: int | None = None,
 ) -> IngestionResult:
     """Validate one external batch against the dataset schema.
 
@@ -126,14 +146,24 @@ def validate_batch(
         provenance={
             "source_system": source_system,
             "batch_id": batch_id,
+            "schema_version": schema_version,
+            "expected_schema_version": SCHEMA_VERSIONS.get(dataset),
             "received_at": datetime.now(timezone.utc).isoformat(),
             "row_count": int(len(frame)),
+            "validation_status": "PENDING",
         },
     )
 
     schema = DATASET_SCHEMAS.get(dataset)
     if schema is None:
         _reject(result, "unknown_dataset", f"Dataset '{dataset}' is not an ingestable source.")
+        return result
+
+    declared_version = schema_version if schema_version is not None else SCHEMA_VERSIONS.get(dataset)
+    if declared_version != SCHEMA_VERSIONS.get(dataset):
+        _reject(result, "schema_version_mismatch",
+                f"Batch declares schema version {declared_version}; this deployment expects "
+                f"{SCHEMA_VERSIONS.get(dataset)}. Refusing best-effort parsing.")
         return result
 
     today = today or date.today()
@@ -204,6 +234,34 @@ def validate_batch(
             _reject(result, "impossible_values",
                     f"Column '{column}' has {bad} values outside [{low}, {high}].", bad)
 
+    # Unexpected categorical values.
+    for column, allowed in CATEGORICAL_VALUES.get(dataset, {}).items():
+        if column not in frame.columns:
+            continue
+        observed = frame[column].dropna().astype(str)
+        unexpected = sorted(set(observed) - allowed)
+        if unexpected:
+            _reject(result, "unexpected_category",
+                    f"Column '{column}' has values outside its vocabulary: {unexpected[:5]}",
+                    int(observed.isin(unexpected).sum()))
+
+    # Out-of-order events within the batch (per person): a feed that arrives
+    # disordered is a source-system fault worth stopping on, because ordering
+    # assumptions later (rolling features) become silently wrong.
+    if "date" in parsed:
+        ordered = frame.assign(_d=parsed["date"]).sort_values(["person_id", "_d"], kind="mergesort")
+        person_dates = ordered.groupby("person_id")["_d"]
+        # A batch is "in order" when the file order is already non-decreasing per person.
+        file_order = frame.assign(_d=parsed["date"])
+        violations = 0
+        for _, group in file_order.groupby("person_id"):
+            dates = group["_d"].dropna()
+            violations += int((dates.diff().dt.days < 0).sum())
+        if violations:
+            _reject(result, "out_of_order_events",
+                    f"{violations} out-of-order events within the batch (per-person dates decrease).",
+                    violations)
+
     # Freshness: a stale export must not silently replace current data.
     all_dates = [v.dropna().max() for v in parsed.values()] if parsed else []
     if all_dates:
@@ -215,4 +273,5 @@ def validate_batch(
                     f"older than the known latest ({known_latest_date}); a stale export "
                     "must not replace current data.")
 
+    result.provenance["validation_status"] = "ACCEPTED" if result.accepted else "REJECTED"
     return result

@@ -5,12 +5,13 @@ from typing import Any
 from fastapi import APIRouter, Depends as FastAPIDepends, Header, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from app.api.dependencies import require_audit, require_welfare, require_principal
+from app.api.dependencies import require_audit, require_welfare, require_principal, unit_scope_for
 from app.core.paths import AUDIT_PATH
 from app.security.principal import Principal
 from app.services.workflow import (
     DataUnavailable,
     complete_followup,
+    get_history,
     get_item,
     list_followups,
     list_items,
@@ -68,7 +69,7 @@ def pending(
     principal: Principal = FastAPIDepends(require_principal),
 ) -> dict[str, Any]:
     _welfare(principal, "/api/workflow/pending")
-    items = _run(lambda: list_items(pending_only=True, limit=limit))
+    items = _run(lambda: list_items(pending_only=True, limit=limit, unit_scope=unit_scope_for(principal)))
     return {"phase": "Phase 10 — Human-in-the-loop intervention workflow", "items": items, "count": len(items),
             "limit": limit, "truncated": len(items) >= limit,
             "privacy_note": "Workflow output excludes raw wellness/self-report responses."}
@@ -81,7 +82,7 @@ def follow_ups(
     principal: Principal = FastAPIDepends(require_principal),
 ) -> dict[str, Any]:
     _welfare(principal, "/api/workflow/follow-ups")
-    items = _run(lambda: list_followups(status=status, limit=limit))
+    items = _run(lambda: list_followups(status=status, limit=limit, unit_scope=unit_scope_for(principal)))
     return {"items": items, "count": len(items),
             "privacy_note": "Follow-up output contains welfare-continuity metadata only."}
 
@@ -92,13 +93,14 @@ def complete_follow_up(
     principal: Principal = FastAPIDepends(require_principal),
 ) -> dict[str, Any]:
     _welfare(principal, f"/api/workflow/follow-ups/{followup_id}/complete")
-    return _run(lambda: complete_followup(followup_id, actor_role=principal.role.value, purpose=principal.purpose.value))
+    return _run(lambda: complete_followup(followup_id, actor_role=principal.role.value,
+                                         purpose=principal.purpose.value, unit_scope=unit_scope_for(principal)))
 
 
 @router.get("/{workflow_item_id}")
 def detail(workflow_item_id: str, principal: Principal = FastAPIDepends(require_principal)) -> dict[str, Any]:
     _welfare(principal, f"/api/workflow/{workflow_item_id}")
-    item = _run(lambda: get_item(workflow_item_id))
+    item = _run(lambda: get_item(workflow_item_id, unit_scope=unit_scope_for(principal)))
     if item is None: raise HTTPException(status_code=404, detail="Workflow item not found")
     item["privacy_note"] = PRIVACY_NOTE
     return item
@@ -111,7 +113,8 @@ def transition(workflow_item_id: str, payload: WorkflowTransitionRequest,
     return _run(lambda: transition_item(
         workflow_item_id, new_state=payload.new_state,
         actor_role=principal.role.value, purpose=principal.purpose.value,
-        reason_code=payload.reason_code, expected_state=payload.expected_state))
+        reason_code=payload.reason_code, expected_state=payload.expected_state,
+        unit_scope=unit_scope_for(principal)))
 
 
 @router.post("/{workflow_item_id}/feedback")
@@ -132,7 +135,7 @@ def submit_feedback(workflow_item_id: str, payload: WorkflowFeedbackRequest,
         workflow_item_id, helpfulness=payload.helpfulness, comment=payload.comment,
         follow_up_requested=payload.follow_up_requested,
         actor_role=principal.role.value, purpose=principal.purpose.value,
-        idempotency_key=idempotency_key))
+        idempotency_key=idempotency_key, unit_scope=unit_scope_for(principal)))
 
 
 @router.post("/{workflow_item_id}/follow-up")
@@ -141,24 +144,30 @@ def schedule_follow_up(workflow_item_id: str, payload: WorkflowFollowUpRequest,
     _welfare(principal, f"/api/workflow/{workflow_item_id}/follow-up")
     return _run(lambda: schedule_followup(
         workflow_item_id, payload.scheduled_for,
-        actor_role=principal.role.value, purpose=principal.purpose.value))
+        actor_role=principal.role.value, purpose=principal.purpose.value,
+        unit_scope=unit_scope_for(principal)))
 
 
 @router.get("/{workflow_item_id}/history")
 def history(workflow_item_id: str, principal: Principal = FastAPIDepends(require_principal)) -> dict[str, Any]:
     """Per-case transition history.
 
-    Welfare staff see their own case history; auditors may review history for
-    governance. Both require a matching purpose - an auditor's ``AUDIT`` purpose
-    alone is not a licence to use the welfare endpoint.
+    Welfare staff see their own case history in full; auditors see the same
+    governance events with personnel identifiers removed. An ``AUDIT`` purpose is
+    oversight of decisions, not a licence to read an individual's welfare record -
+    which is why the two branches are not the same payload.
     """
     if principal.purpose.value == "WELFARE_SUPPORT":
         require_welfare(principal, f"/api/workflow/{workflow_item_id}/history", AUDIT_PATH)
-    elif principal.purpose.value == "AUDIT":
+        item = _run(lambda: get_item(workflow_item_id, unit_scope=unit_scope_for(principal)))
+        if item is None: raise HTTPException(status_code=404, detail="Workflow item not found")
+        return {"workflow_item_id": workflow_item_id, "events": item["history"], "count": len(item["history"]),
+                "privacy_note": PRIVACY_NOTE}
+    if principal.purpose.value == "AUDIT":
         require_audit(principal, f"/api/workflow/{workflow_item_id}/history", AUDIT_PATH)
-    else:
-        raise HTTPException(status_code=403, detail="Workflow history requires welfare-support or audit authorization.")
-    item = _run(lambda: get_item(workflow_item_id))
-    if item is None: raise HTTPException(status_code=404, detail="Workflow item not found")
-    events = item["history"]
-    return {"workflow_item_id": workflow_item_id, "events": events, "count": len(events), "privacy_note": PRIVACY_NOTE}
+        events = _run(lambda: get_history(workflow_item_id))
+        redacted = [{key: value for key, value in event.items() if key != "person_id"} for event in events]
+        return {"workflow_item_id": workflow_item_id, "events": redacted, "count": len(redacted),
+                "person_identifiers_redacted": True,
+                "privacy_note": "Governance view of transition history; personnel identifiers are not disclosed to the audit purpose."}
+    raise HTTPException(status_code=403, detail="Workflow history requires welfare-support or audit authorization.")

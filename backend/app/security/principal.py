@@ -150,13 +150,16 @@ def build_authenticator(auth_mode: str) -> Authenticator:
     if auth_mode == AUTH_MODE_DEMO:
         return HeaderTrustAuthenticator()
     if auth_mode == AUTH_MODE_PRODUCTION:
-        raise ProductionAuthenticationRequired(
-            "FORTIFY_AUTH_MODE=production requires a real identity-provider "
-            "authenticator (OIDC/OAuth2/SSO). None is implemented in this "
-            "prototype. Implement app.security.principal.Authenticator against "
-            "your identity provider and register it in build_authenticator(), "
-            "or run with FORTIFY_AUTH_MODE=demo on a trusted network."
-        )
+        # Production requires a real IdP integration: the OIDC bearer-token
+        # validator in app.security.oidc, configured via environment. Without
+        # that configuration, startup refuses (fail closed) - there is no
+        # fallback to header trust.
+        from .oidc import build_oidc_authenticator
+
+        try:
+            return build_oidc_authenticator()
+        except RuntimeError as exc:
+            raise ProductionAuthenticationRequired(str(exc)) from exc
     raise ProductionAuthenticationRequired(
         f"Unknown FORTIFY_AUTH_MODE {auth_mode!r}; expected 'demo' or 'production'."
     )

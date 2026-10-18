@@ -51,7 +51,7 @@ def main() -> None:
     print(f"Input features: {len(df.columns):,}")
     print(f"Output features: {len(out.columns):,}")
     print(f"New baseline/context features: {len(out.columns) - len(df.columns):,}")
-    print(f"Date range: {out['date'].min()} → {out['date'].max()}")
+    print(f"Date range: {out['date'].min()} -> {out['date'].max()}")
     print(f"Wrote: {output}")
     print(f"Report: {report_path}")
 

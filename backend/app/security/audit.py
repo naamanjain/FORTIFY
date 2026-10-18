@@ -210,28 +210,39 @@ class AuditLog:
 
     # ---- public API -----------------------------------------------------
 
+    # Append fast-path state: {path: {"size": int, "head": str, "count": int}}.
+    # Reading the whole file to find the tail hash costs O(log size) per append;
+    # the tail state of a verified log lets appends hash only their own record.
+    _APPEND_STATE: dict[str, dict[str, Any]] = {}
+
     def append(self, event: AuditEvent) -> str:
         """Append one event, extending the chain and re-anchoring it atomically."""
         with _append_lock(self._lock_path):
             previous_hash = _GENESIS
             count = 0
             if self.path.exists():
-                lines = [
-                    line
-                    for line in self.path.read_text(encoding="utf-8").splitlines()
-                    if line.strip()
-                ]
-                if lines:
-                    try:
-                        previous_hash = json.loads(lines[-1])["event_hash"]
-                    except (json.JSONDecodeError, KeyError, TypeError):
-                        # A corrupt tail must not be silently overwritten. Refuse
-                        # the append so evidence is preserved for an auditor.
-                        raise ValueError(
-                            "Audit log tail is unreadable; refusing to append. "
-                            "Inspect and repair the log before continuing."
-                        ) from None
-                    count = len(lines)
+                stat = self.path.stat()
+                cached = AuditLog._APPEND_STATE.get(str(self.path))
+                if cached is not None and cached["size"] == stat.st_size:
+                    previous_hash = cached["head"]
+                    count = cached["count"]
+                else:
+                    lines = [
+                        line
+                        for line in self.path.read_text(encoding="utf-8").splitlines()
+                        if line.strip()
+                    ]
+                    if lines:
+                        try:
+                            previous_hash = json.loads(lines[-1])["event_hash"]
+                        except (json.JSONDecodeError, KeyError, TypeError):
+                            # A corrupt tail must not be silently overwritten. Refuse
+                            # the append so evidence is preserved for an auditor.
+                            raise ValueError(
+                                "Audit log tail is unreadable; refusing to append. "
+                                "Inspect and repair the log before continuing."
+                            ) from None
+                        count = len(lines)
 
             payload = {
                 "event_type": event.event_type,
@@ -254,10 +265,37 @@ class AuditLog:
             # an unanchored log, which verify() reports rather than silently
             # accepting.
             self._write_anchor(event_hash, count + 1)
+            AuditLog._APPEND_STATE[str(self.path)] = {
+                "size": self.path.stat().st_size, "head": event_hash, "count": count + 1,
+            }
             return event_hash
+
+    # Verification cache: chain verification reads and hashes the whole file,
+    # which grows without bound. The chain only changes on append, so the
+    # verification result is cached keyed on (size, mtime_ns); any append or
+    # external modification changes the signature and forces re-verification.
+    # Deliberately process-local and short-lived: it removes repeated full-file
+    # hashing, not the need for periodic deep verification by an external job.
+    _VERIFY_CACHE: dict[tuple[int, int, str], "ChainVerification"] = {}
 
     def verify(self) -> ChainVerification:
         """Full verification, including truncation and forgery checks."""
+        if self.path.exists():
+            stat = self.path.stat()
+            signature = (stat.st_size, stat.st_mtime_ns, str(self.path))
+            cached = AuditLog._VERIFY_CACHE.get(signature)
+            if cached is not None:
+                return cached
+        verification = self._verify_uncached()
+        if self.path.exists():
+            stat = self.path.stat()
+            signature = (stat.st_size, stat.st_mtime_ns, str(self.path))
+            if len(AuditLog._VERIFY_CACHE) > 8:
+                AuditLog._VERIFY_CACHE.clear()
+            AuditLog._VERIFY_CACHE[signature] = verification
+        return verification
+
+    def _verify_uncached(self) -> ChainVerification:
         head_hash, count, internally_valid = self._recompute_chain()
         if not internally_valid:
             return ChainVerification(False, "Hash chain is broken: a record was altered or reordered.", count, True, head_hash)
@@ -300,6 +338,69 @@ class AuditLog:
             )
 
         return ChainVerification(True, "Audit chain is intact.", count, True, head_hash)
+
+    # Incremental tail state: {path: {"size": int, "head": str, "count": int,
+    # "anchor_valid": bool}}. Appends extend the chain monotonically, so once a
+    # prefix is verified only the new tail needs hashing. Any shrinkage falls
+    # back to a full verification (and fails, because of the anchor).
+    _TAIL_STATE: dict[str, dict[str, Any]] = {}
+
+    def verify_incremental(self) -> ChainVerification:
+        """Verification optimised for repeated polls of a growing log.
+
+        Hashes only records appended since the last verified state. Truncation,
+        rewrites and anchor mismatch still fail (they change size/head), and a
+        full :meth:`verify` runs whenever the tail state does not line up.
+        """
+        if not self.path.exists():
+            return ChainVerification(True, "Audit log is empty.", 0, True, _GENESIS)
+        stat = self.path.stat()
+        state = AuditLog._TAIL_STATE.get(str(self.path))
+        anchor = self._read_anchor()
+        if anchor is None:
+            return self._verify_uncached()
+
+        expected_signature = hmac.new(
+            self._key(),
+            json.dumps(
+                {"head_hash": anchor.get("head_hash"), "records": anchor.get("records")},
+                sort_keys=True, separators=(",", ":"),
+            ).encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        anchor_ok = hmac.compare_digest(expected_signature, str(anchor.get("signature", "")))
+
+        if state is None or stat.st_size < state["size"]:
+            return self._verify_uncached()
+
+        with self.path.open("rb") as handle:
+            handle.seek(state["size"])
+            tail = handle.read()
+        lines = [line for line in tail.decode("utf-8").splitlines() if line.strip()]
+        previous_hash = state["head"]
+        count = state["count"]
+        for line in lines:
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                return ChainVerification(False, "Hash chain is broken: unparseable record.", count, True, previous_hash)
+            record_hash = record.pop("event_hash", None)
+            if record.get("previous_hash") != previous_hash:
+                return ChainVerification(False, "Hash chain is broken: a record was altered or reordered.", count, True, previous_hash)
+            canonical = json.dumps(record, sort_keys=True, separators=(",", ":"))
+            expected = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+            if expected != record_hash:
+                return ChainVerification(False, "Hash chain is broken: a record was altered.", count, True, previous_hash)
+            previous_hash = record_hash
+            count += 1
+
+        if anchor_ok and (anchor.get("records") != count or anchor.get("head_hash") != previous_hash):
+            return ChainVerification(False, "Audit log does not match the anchor; records were truncated or removed.", count, True, previous_hash)
+        if not anchor_ok:
+            return ChainVerification(False, "Audit anchor signature is invalid; the anchor was altered.", count, True, previous_hash)
+
+        AuditLog._TAIL_STATE[str(self.path)] = {"size": stat.st_size, "head": previous_hash, "count": count}
+        return ChainVerification(True, "Audit chain is intact (incremental).", count, True, previous_hash)
 
     def verify_chain(self) -> bool:
         """Backwards-compatible boolean form of :meth:`verify`."""

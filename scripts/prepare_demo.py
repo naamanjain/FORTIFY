@@ -33,7 +33,29 @@ def load(path: Path) -> pd.DataFrame:
     return df
 
 
-def choose_hero(merged: pd.DataFrame) -> tuple[str, pd.Timestamp, float]:
+def open_workflow_cases(db_path: Path) -> dict[tuple[str, str], str]:
+    """Cases that exist in the workflow store AND still expect a human decision."""
+    import sqlite3
+    from app.services.workflow import PENDING_STATES
+    initialize_workflow_store()
+    placeholders = ",".join("?" for _ in PENDING_STATES)
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(
+            f"SELECT person_id, recommendation_date, workflow_state FROM workflow_items"
+            f" WHERE workflow_state IN ({placeholders})",
+            PENDING_STATES,
+        ).fetchall()
+    return {(str(pid), str(day)): str(state) for pid, day, state in rows}
+
+
+def choose_hero(merged: pd.DataFrame, open_cases: dict[tuple[str, str], str]) -> tuple[str, pd.Timestamp, float]:
+    """Pick the demonstration case among cases a welfare officer can really open.
+
+    The hero used to be chosen from the scoring outputs alone, which regularly
+    selected a person-day the alert policy never turned into a workflow case -
+    so the scripted demo step "open the prepared hero case" landed on a profile
+    with no case, and the missing row was reported as state NEW.
+    """
     candidates = []
     for person_id, g in merged.groupby("person_id", sort=True):
         g = g.sort_values("date").reset_index(drop=True)
@@ -45,10 +67,15 @@ def choose_hero(merged: pd.DataFrame) -> tuple[str, pd.Timestamp, float]:
         for _, row in c.iterrows():
             delta = float(row["welfare_risk_probability"] - row["prior_21d_probability"])
             flags = [x.strip() for x in str(row["constraint_flags"]).split("|") if x.strip()]
-            if delta > 0 and len(flags) >= 2:
+            key = (str(person_id), row["date"].strftime("%Y-%m-%d"))
+            if delta > 0 and len(flags) >= 2 and key in open_cases:
                 candidates.append((delta, str(person_id), row["date"]))
     if not candidates:
-        raise ValueError("No deterministic hero case satisfies Phase 12 demo criteria")
+        raise ValueError(
+            "No open workflow case satisfies the Phase 12 demo criteria; the review "
+            "queue and the demonstration script have diverged. Run build_review_queue.py "
+            "and do not ship a hero case that no officer can open."
+        )
     delta, person_id, date = max(candidates, key=lambda x: (x[0], x[1], x[2]))
     return person_id, pd.Timestamp(date), delta
 
@@ -75,15 +102,13 @@ def main() -> int:
     merged = predictions.merge(recs, on=["person_id", "date"], suffixes=("", "_recommendation"), validate="one_to_one")
     merged = merged.merge(feas, on=["person_id", "date", "recommended_action"], suffixes=("", "_feasibility"), validate="one_to_one")
 
-    person_id, target_date, delta = choose_hero(merged)
+    db_path = _db_path()
+    open_cases = open_workflow_cases(db_path)
+    person_id, target_date, delta = choose_hero(merged, open_cases)
     hero = merged[(merged.person_id == person_id) & (merged.date.between(target_date - pd.Timedelta(days=21), target_date))].sort_values("date").copy()
 
-    initialize_workflow_store()
-    import sqlite3
-    db_path = _db_path()
-    with sqlite3.connect(db_path) as conn:
-        row = conn.execute("SELECT workflow_state FROM workflow_items WHERE workflow_item_id=?", (_workflow_id(person_id, target_date.strftime("%Y-%m-%d")),)).fetchone()
-        workflow_state = row[0] if row else "NEW"
+    day_key = target_date.strftime("%Y-%m-%d")
+    workflow_state = open_cases[(person_id, day_key)]
 
     timeline_cols = [
         "person_id", "date", "welfare_risk_probability", "risk_band", "recommended_action",

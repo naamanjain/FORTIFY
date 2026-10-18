@@ -163,7 +163,7 @@ def scenario_f() -> None:
     item = get(f"/api/workflow/{item_id}", WO, WS).json()
     payloads.append(item)
     ok = item.get("workflow_state") == "IN_REVIEW" and len(scan_forbidden(item)) == 0
-    check("F  workflow lifecycle (NEW→ACKNOWLEDGED→IN_REVIEW, audited)", ok,
+    check("F  workflow lifecycle (NEW->ACKNOWLEDGED->IN_REVIEW, audited)", ok,
           f"final state={item.get('workflow_state')}")
 
 

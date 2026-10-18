@@ -8,6 +8,10 @@ from fastapi.testclient import TestClient
 
 import app.main as main
 import app.services.workflow as workflow
+from app.security.rbac import UnitScope as _UnitScope
+
+# Direct (non-HTTP) service callers must state an explicit scope.
+_SCRIPT_SCOPE = _UnitScope.script()
 
 
 HEADERS = {"X-Fortify-Role": "WELFARE_OFFICER", "X-Fortify-Purpose": "WELFARE_SUPPORT"}
@@ -32,7 +36,7 @@ def first_workflow_id() -> str:
     the queue's ordering (date, score desc, person id), not from a hardcoded
     person.
     """
-    items = workflow.list_items(pending_only=True, limit=1)
+    items = workflow.list_items(pending_only=True, limit=1, unit_scope=_SCRIPT_SCOPE)
     if not items:
         raise RuntimeError("No pending workflow items; run scripts/build_all.py")
     return items[0]["workflow_item_id"]

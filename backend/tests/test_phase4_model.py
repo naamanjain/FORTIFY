@@ -157,3 +157,54 @@ def test_cli_train_and_validate(tmp_path: Path) -> None:
         check=False,
     )
     assert result2.returncode == 0, result2.stdout + result2.stderr
+
+
+def test_estimator_uses_the_configured_convergence_tolerance() -> None:
+    """The fitted optimum must be demanded explicitly.
+
+    sklearn's default tol is 1e-4. Left at that value, liblinear stops while the
+    solution is still ~1e-3 away from the unique optimum of this strictly convex
+    problem, and two platforms settle on two different models - which is how
+    Windows and Linux produced different review queues from identical features.
+    """
+    trainer = RiskModelTrainer(ModelConfig(min_training_samples=5, train_fraction=0.5,
+                                           validation_fraction=0.25, test_fraction=0.25))
+    fitted = trainer.train(make_fixture())["model"]
+    estimator = fitted.steps[-1][1]
+    assert estimator.tol == ModelConfig().tolerance
+    assert estimator.tol < 1e-4, "tolerance regressed to the sklearn default"
+
+
+def test_loose_tolerance_chooses_a_different_model() -> None:
+    """Tolerance is load-bearing: loosening it must change the probabilities.
+
+    If this ever passes with equal probabilities, the tolerance no longer
+    influences the fit and the guard above is protecting nothing.
+    """
+    from sklearn.metrics import log_loss
+
+    df = make_fixture()
+    kwargs = dict(min_training_samples=5, train_fraction=0.5,
+                  validation_fraction=0.25, test_fraction=0.25)
+    loose = RiskModelTrainer(ModelConfig(tolerance=1e-4, **kwargs)).train(df.copy())
+    tight = RiskModelTrainer(ModelConfig(tolerance=1e-10, **kwargs)).train(df.copy())
+
+    loose_prob = loose["validation"][1]
+    tight_prob = tight["validation"][1]
+    assert not np.array_equal(loose_prob, tight_prob), (
+        "a 1e-4 and a 1e-10 fit produced identical probabilities; "
+        "the tolerance is not reaching the estimator"
+    )
+    y = loose["validation"][0]["target"].to_numpy(dtype=int)
+    assert log_loss(y, tight_prob, labels=[0, 1]) <= log_loss(y, loose_prob, labels=[0, 1]) + 1e-12
+
+
+def test_training_is_reproducible_on_one_platform() -> None:
+    """Byte-for-byte repeatable within an environment, at the pinned tolerance."""
+    df = make_fixture()
+    config = ModelConfig(min_training_samples=5, train_fraction=0.5,
+                         validation_fraction=0.25, test_fraction=0.25)
+    a = RiskModelTrainer(config).train(df.copy())
+    b = RiskModelTrainer(config).train(df.copy())
+    assert np.array_equal(a["validation"][1], b["validation"][1])
+    assert a["metadata"]["feature_count"] == b["metadata"]["feature_count"]

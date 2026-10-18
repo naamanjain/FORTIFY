@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from backend.app.ml.model_compat import stamp_metadata
 from backend.app.ml.model_config import ModelConfig
 from backend.app.ml.model_training import RiskModelTrainer
 
@@ -44,6 +45,9 @@ def main() -> int:
     )
     trainer = RiskModelTrainer(config)
     result = trainer.train(frame)
+    # Stamp compatibility fields so Phase 5 and /ready can verify the artifact
+    # set at runtime (model <-> feature schema <-> pipeline version).
+    result["metadata"] = stamp_metadata(result["metadata"], input_path, "pipeline-v2-latent-aware")
     trainer.save_artifacts(
         result,
         output_dir / "fortify_phase4_logistic_regression.joblib",

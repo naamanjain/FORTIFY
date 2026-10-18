@@ -30,7 +30,7 @@ export default function Attention() {
   useEffect(()=>{void load()},[])
   useEffect(()=>{if(!query.trim()){setSearchResults([]);return}const t=setTimeout(()=>void searchDashboard(query.trim()).then(r=>setSearchResults(r.results)).catch(()=>setSearchResults([])),150);return()=>clearTimeout(t)},[query])
   const latest=overview?.as_of_date ?? ''
-  const active=useMemo<Row[]>(()=>items.filter(x=>x.date===latest&&x.risk_band!=='LOW'&&!['COMPLETED','DISMISSED'].includes(x.workflow_state)),[items,latest])
+  const active=useMemo<Row[]>(()=>items.filter(x=>x.risk_band!=='LOW'&&!['COMPLETED','DISMISSED'].includes(x.workflow_state)),[items])
   const unitOptions=useMemo(()=>Array.from(new Set(active.map(x=>x.unit_id).filter(Boolean) as string[])).sort(),[active])
   const filtered=useMemo(()=>active.filter(x=>(concern==='all'||x.risk_band===concern)&&(change==='all'||x.trend===change)&&(status==='all'||x.workflow_state===status)&&(unit==='all'||x.unit_id===unit)),[active,concern,change,status,unit])
   const openPerson=(personId:string)=>push(`/person/${encodeURIComponent(personId)}`)

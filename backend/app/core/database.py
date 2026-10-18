@@ -19,6 +19,7 @@ does not send SQLite directives to it.
 """
 from __future__ import annotations
 
+import os
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator, Any
@@ -140,6 +141,46 @@ class PostgresConnection:
         self._conn.close()
 
 
+_PG_POOL: Any = None
+
+
+def _postgres_pool() -> Any:
+    """Lazily create the connection pool (one per process).
+
+    Pooling is a production requirement (connection setup is expensive and a
+    multi-worker deployment exhausts server connections without it). The pool
+    recovers from server restarts: lost connections are replaced on checkout.
+    """
+    global _PG_POOL
+    if _PG_POOL is None:
+        try:
+            from psycopg_pool import ConnectionPool
+        except ImportError as exc:  # pragma: no cover
+            raise RuntimeError(
+                "FORTIFY_DATABASE_URL is a PostgreSQL URL but psycopg_pool is not "
+                "installed. Install requirements-postgres.txt."
+            ) from exc
+        # Reconnection is the pool's default behaviour: a server restart or a
+        # dropped connection is replaced on the next checkout.
+        _PG_POOL = ConnectionPool(
+            settings.database_url,
+            min_size=1,
+            max_size=int(os.getenv("FORTIFY_PG_POOL_MAX", "8")),
+            open=False,
+            kwargs={"autocommit": False},
+        )
+        _PG_POOL.open(wait=False, timeout=10.0)
+    return _PG_POOL
+
+
+def close_postgres_pool() -> None:
+    """Release pool connections (graceful shutdown)."""
+    global _PG_POOL
+    if _PG_POOL is not None:
+        _PG_POOL.close()
+        _PG_POOL = None
+
+
 @contextmanager
 def connect(sqlite_path: Path | None = None) -> Iterator[Any]:
     """Yield a connection for the configured database.
@@ -151,21 +192,20 @@ def connect(sqlite_path: Path | None = None) -> Iterator[Any]:
     """
     if is_postgres():
         try:
-            import psycopg  # optional dependency: requirements-postgres.txt
+            import psycopg  # noqa: F401  (driver presence check)
         except ImportError as exc:  # pragma: no cover - exercised only without the extra
             raise RuntimeError(
                 "FORTIFY_DATABASE_URL is a PostgreSQL URL but the psycopg driver "
                 "is not installed. Install requirements-postgres.txt."
             ) from exc
-        conn = psycopg.connect(settings.database_url, autocommit=False)
-        try:
-            yield PostgresConnection(conn)
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
+        pool = _postgres_pool()
+        with pool.connection() as conn:
+            try:
+                yield PostgresConnection(conn)
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
         return
 
     import sqlite3

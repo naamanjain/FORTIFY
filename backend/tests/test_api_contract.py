@@ -19,6 +19,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.security.rbac import UnitScope as _UnitScope
+_SCRIPT_SCOPE = _UnitScope.script()
 
 WELFARE = {"X-Fortify-Role": "WELFARE_OFFICER", "X-Fortify-Purpose": "WELFARE_SUPPORT"}
 AGGREGATE = {"X-Fortify-Role": "COMMANDER", "X-Fortify-Purpose": "AGGREGATE_OPERATIONS"}
@@ -203,7 +205,7 @@ class TestOptimisticConcurrencyContract:
         a clear 400, not a silent overwrite."""
         from app.services.workflow import list_items
 
-        items = list_items(pending_only=True, limit=1)
+        items = list_items(pending_only=True, limit=1, unit_scope=_SCRIPT_SCOPE)
         if not items:
             pytest.skip("no pending workflow items")
         item_id = items[0]["workflow_item_id"]
@@ -229,8 +231,8 @@ class TestIdempotencyContract:
 
         # Find a case with a support event but no feedback yet.
         candidate = None
-        for item in list_items(pending_only=False, limit=200):
-            detail = get_item(item["workflow_item_id"])
+        for item in list_items(pending_only=False, limit=200, unit_scope=_SCRIPT_SCOPE):
+            detail = get_item(item["workflow_item_id"], unit_scope=_SCRIPT_SCOPE)
             if detail and detail.get("support_event") and not detail.get("feedback"):
                 candidate = detail
                 break

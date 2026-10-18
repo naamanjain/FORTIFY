@@ -8,6 +8,10 @@ from fastapi.testclient import TestClient
 
 import app.main as main
 import app.services.workflow as workflow
+from app.security.rbac import UnitScope as _UnitScope
+
+# Direct (non-HTTP) service callers must state an explicit scope.
+_SCRIPT_SCOPE = _UnitScope.script()
 
 HEADERS = {"X-Fortify-Role": "WELFARE_OFFICER", "X-Fortify-Purpose": "WELFARE_SUPPORT"}
 AUDITOR = {"X-Fortify-Role": "AUDITOR", "X-Fortify-Purpose": "AUDIT"}
@@ -23,7 +27,7 @@ def isolated_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 def item_id() -> str:
     """First pending case from the alert-policy queue (see test_phase10)."""
-    items = workflow.list_items(pending_only=True, limit=1)
+    items = workflow.list_items(pending_only=True, limit=1, unit_scope=_SCRIPT_SCOPE)
     if not items:
         raise RuntimeError("No pending workflow items; run scripts/build_all.py")
     return items[0]["workflow_item_id"]

@@ -24,10 +24,14 @@ def test_readiness_reports_dependency_state() -> None:
     response = client.get("/ready")
     body = response.json()
     assert response.status_code in (200, 503)
-    # Whatever the outcome, the decision and its causes must be explained.
+    # Whatever the outcome, the decision and its causes must be explained,
+    # with the three readiness layers explicitly separated.
     assert body["ready"] is (response.status_code == 200)
     assert body["version"] == APP_VERSION
-    assert set(body["checks"]) == {"database", "artifacts", "data_quality"}
+    assert body["system"]["database"] in ("ok", "unavailable")
+    assert body["data"]["artifacts"] in ("ok", "missing")
+    assert body["data"]["data_quality"] in ("ok", "errors")
+    assert isinstance(body["model"]["ready"], bool)
     if not body["ready"]:
         assert body["remedy"]
 
