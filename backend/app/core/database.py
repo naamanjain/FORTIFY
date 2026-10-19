@@ -5,13 +5,15 @@ kept dialect-neutral (ANSI with ``ON CONFLICT`` upserts, which SQLite >= 3.24
 and PostgreSQL both implement) so that the same schema and queries run on
 PostgreSQL for a departmental deployment.
 
-What is verified today:
+What is covered:
 
 * SQLite: the full test suite, lifecycle scripts, concurrency tests.
-* PostgreSQL: schema creation, system metadata, workflow store initialization,
-  transitions and concurrent transitions under a real postgres server (see
-  ``backend/tests/test_postgres_live.py``, skipped automatically when no server
-  is configured).
+* PostgreSQL: schema creation, versioned migrations, system metadata, a real
+  workflow transition, partial unique indexes and concurrent-transition row
+  locking are exercised by ``backend/tests/test_postgres_live.py`` when
+  ``FORTIFY_TEST_POSTGRES_URL`` points at a disposable server, and by the
+  ``postgres-integration`` CI job. The default suite skips that module when no
+  server is configured; a green default run does not prove the live path.
 
 What remains SQLite-only: the ``PRAGMA`` connection settings below. They are
 guarded by an explicit ``is_sqlite`` check so pointing the app at PostgreSQL

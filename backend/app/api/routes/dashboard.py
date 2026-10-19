@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 from pathlib import Path
 import json
+import re
 from datetime import datetime, timezone
 from threading import RLock
 from typing import Any
@@ -19,6 +20,7 @@ from app.api.dependencies import (
     require_principal,
     unit_scope_for,
 )
+from app.core import database
 from app.core.database import check_database
 from app.core.paths import ARTIFACTS_DIR as _DEFAULT_ARTIFACTS_DIR
 from app.core.paths import AUDIT_PATH as _DEFAULT_AUDIT_PATH
@@ -434,10 +436,25 @@ def data_sources(principal: Principal = FastAPIDepends(require_principal)) -> di
 def audit_view(limit: int = Query(default=25, ge=1, le=100),
                principal: Principal = FastAPIDepends(require_principal)) -> dict[str, Any]:
     require_audit(principal, "/api/dashboard/audit", _authz_audit_path())
-    log = AuditLog(AUDIT_PATH); events = []; malformed = 0
+    log = AuditLog(AUDIT_PATH)
+    scope = unit_scope_for(principal)
+    person_units: dict[str, str] = {}
+    case_units: dict[str, str] = {}
+    if not scope.all_units and scope.units:
+        identity_path = DATA_DIR / "personnel.csv"
+        if identity_path.exists():
+            identity = pd.read_csv(identity_path, usecols=["person_id", "unit_id"]).drop_duplicates()
+            person_units = {str(r.person_id): str(r.unit_id) for r in identity.itertuples(index=False)}
+        case_units = _workflow_case_units()
+    # Filter before the limit: paging the tail first would let out-of-scope
+    # events crowd out the caller's own older events. Malformed lines are
+    # counted across the whole log, not just the requested page.
+    visible: list[dict[str, Any]] = []
+    malformed = 0
     if AUDIT_PATH.exists():
-        lines = [line for line in AUDIT_PATH.read_text(encoding="utf-8").splitlines()[-limit:] if line.strip()]
-        for line in lines:
+        for line in AUDIT_PATH.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
             try:
                 record = json.loads(line)
             except json.JSONDecodeError:
@@ -446,32 +463,121 @@ def audit_view(limit: int = Query(default=25, ge=1, le=100),
                 # most needs to read it. Count it and surface it instead.
                 malformed += 1
                 continue
-            events.append({"event_type": record.get("event_type"), "actor_role": record.get("actor_role"), "purpose": record.get("purpose"),
-                           "outcome": record.get("outcome"), "resource": _redact_text(record.get("resource")), "timestamp": record.get("timestamp"),
-                           "details": _redact_details(record.get("details", {}))})
+            if not isinstance(record, dict):
+                malformed += 1
+                continue
+            if _audit_event_visible(record, scope, person_units, case_units):
+                visible.append(record)
+    events = [{"event_type": record.get("event_type"), "actor_role": record.get("actor_role"), "purpose": record.get("purpose"),
+               "outcome": record.get("outcome"), "resource": _redact_text(record.get("resource")), "timestamp": record.get("timestamp"),
+               "details": _redact_details(record.get("details", {}))}
+              for record in visible[-limit:]]
     verification = log.verify()
     return {"chain_valid": verification.valid, "chain_reason": verification.reason,
             "audit_records": verification.records, "audit_anchored": verification.anchored,
             "malformed_records": malformed,
             "event_count": len(events), "events": events,
-            "privacy_note": "Audit output contains governance metadata only; raw wellness responses and direct personnel identifiers are excluded."}
+            "privacy_note": "Audit output contains governance metadata only; raw wellness responses and direct personnel identifiers are excluded. Events are restricted to the caller's unit scope; chain verification is global."}
 
 
 # Detail keys that carry a direct personnel identifier. The audit log keeps the
 # full value on disk (it is the evidentiary record); the read API redacts it so
 # the governance screen does not become a de facto personnel export.
 _REDACTED_DETAIL_KEYS = {"person_id"}
+_PERSON_ID_PATTERN = re.compile(r"P-[0-9]{3,}")
+_UNIT_RESOURCE_PATTERN = re.compile(r"^/api/dashboard/unit/([^/?#]+)")
+_CASE_RESOURCE_PATTERN = re.compile(r"^/api/workflow/([^/?#]+)")
+
+
+def _workflow_case_units() -> dict[str, str]:
+    """Map case id to unit so the audit view can filter case-scoped events.
+
+    An unavailable store yields an empty map; callers treat an unresolvable
+    case reference as out of scope rather than exposing it.
+    """
+    try:
+        with database.connect() as conn:
+            rows = conn.execute(
+                "SELECT workflow_item_id, unit_id FROM workflow_items"
+            ).fetchall()
+    except Exception:  # noqa: BLE001 - audit reads must degrade, not fail the request
+        return {}
+    return {
+        str(row[0]): str(row[1])
+        for row in rows
+        if row[1] is not None and str(row[1]).strip()
+    }
+
+
+def _detail_person_ids(value: Any) -> set[str]:
+    """Collect every personnel identifier nested in an audit detail payload."""
+    found: set[str] = set()
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key == "person_id" and item is not None:
+                found.add(str(item))
+            else:
+                found |= _detail_person_ids(item)
+    elif isinstance(value, list):
+        for item in value:
+            found |= _detail_person_ids(item)
+    return found
+
+
+def _audit_event_visible(record: dict[str, Any], scope: Any, person_units: dict[str, str],
+                         case_units: dict[str, str]) -> bool:
+    """Whether an auditor scoped to ``scope`` may see this governance event.
+
+    Events that name a unit, case or person must resolve inside the scope; an
+    unresolvable reference is hidden (fail closed). Events with no subject
+    reference are system-level governance metadata and remain visible.
+    """
+    if scope.all_units:
+        return True
+    if not scope.units:
+        return False
+    details = record.get("details")
+    if details is None:
+        details = {}
+    details_named = False
+    if isinstance(details, dict):
+        unit_value = details.get("unit")
+        if unit_value not in (None, ""):
+            details_named = True
+            requested = [part.strip() for part in str(unit_value).split(",") if part.strip()]
+            if not requested or any(not scope.allows(unit) for unit in requested):
+                return False
+    person_ids = _detail_person_ids(details)
+    resource = record.get("resource")
+    if isinstance(resource, str):
+        person_ids |= set(_PERSON_ID_PATTERN.findall(resource))
+        unit_match = _UNIT_RESOURCE_PATTERN.match(resource)
+        if unit_match and not scope.allows(unit_match.group(1)):
+            return False
+        case_match = _CASE_RESOURCE_PATTERN.match(resource)
+        if case_match:
+            case_unit = case_units.get(case_match.group(1))
+            if case_unit is not None:
+                if not scope.allows(case_unit):
+                    return False
+            elif not person_ids and not details_named:
+                # The resource names a case but its unit cannot be resolved and
+                # no other subject detail establishes scope: fail closed.
+                return False
+    for person_id in person_ids:
+        unit_id = person_units.get(person_id)
+        if unit_id is None or not scope.allows(unit_id):
+            return False
+    return True
 
 
 def _redact_text(value: Any) -> Any:
     """Redact personnel identifiers from free-text fields (URL paths in
     resource fields, string details). The on-disk log keeps full values; the
     read API does not."""
-    import re as _re
-
     if not isinstance(value, str):
         return value
-    return _re.sub(r"P-[0-9]{3,}", "[redacted:personnel-identifier]", value)
+    return _PERSON_ID_PATTERN.sub("[redacted:personnel-identifier]", value)
 
 
 def _redact_details(details: Any) -> Any:

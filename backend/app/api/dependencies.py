@@ -235,7 +235,9 @@ def require_units_in_scope(principal: Principal, unit_ids: Iterable[str], resour
     """Same policy for endpoints that name a set of units up front."""
     scope = unit_scope_for(principal)
     requested = [str(u) for u in unit_ids]
-    allowed = scope.all_units or all(scope.allows(u) for u in requested)
+    # An empty request is not "no restriction": all([]) is True, which would
+    # turn a missing unit list into an allow. Fail closed instead.
+    allowed = bool(requested) and (scope.all_units or all(scope.allows(u) for u in requested))
     if audit_path is not None:
         _record_scope_decision(principal, ",".join(sorted(set(requested)))[:200], resource, view, allowed, audit_path)
     if not allowed:

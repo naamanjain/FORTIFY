@@ -1,17 +1,22 @@
-# PostgreSQL migration path
+# PostgreSQL path
 
-**Status: documented future production requirement. FORTIFY's prototype runs
-on SQLite by design, and this document does not pretend otherwise.**
+**Status: implemented application-side path, not a production deployment.**
+SQLite remains the default and the only backend exercised by the full local
+test run. PostgreSQL support is real code, not a plan:
+`FORTIFY_DATABASE_URL` accepts `postgresql://`, `backend/requirements-postgres.txt`
+ships the driver/pool, and the opt-in live test was executed on 2026-10-19
+against a disposable `postgres:16` container (3 passed). Nothing here claims a
+tested departmental deployment.
 
-## Why SQLite is correct for the prototype
+## Why SQLite is still the default
 
 The prototype must be reproducible from a clean clone with one command
 (`python scripts/build_all.py`). SQLite gives that: no server, no credentials,
 no ports, transactional, and a single file that CI can create and discard. The
-demo dataset is small (hundreds of workflow rows), and every concurrent-write
-path is already serialized (see *Concurrency* below). Replacing SQLite "to look
-production-ready" would add a server dependency the demonstration does not
-need and could not exercise in CI.
+demo dataset is small (tens of thousands of workflow rows), and every
+concurrent-write path is serialized (see *Concurrency* below). Requiring a
+database server for the demonstration would add infrastructure the demo does
+not need.
 
 ## Where the line is drawn
 
@@ -22,51 +27,59 @@ SQLite is appropriate **until** any of the following becomes true:
 3. Point-in-time recovery, row-level security, or central backups are required
    by the department operating it.
 
-At that point, deploy PostgreSQL and apply the changes in this document.
+At that point, deploy PostgreSQL using the application path below, and add the
+operational work listed under *What remains*.
 
-## What is already in place (verified)
+## Implemented (application side)
 
-- All persistence lives in exactly two modules: `app/core/database.py` and
-  `app/services/workflow.py`. No route or ML module issues SQL.
-- Every user-influenced value is a bound parameter (`?`). No string-formatted
-  SQL touches request data.
-- Transactions: workflow transitions run inside `BEGIN IMMEDIATE` and re-read
-  the row inside the transaction, so a lost-update race is impossible on one
-  host (regression-tested in `tests/test_security_regression.py` and
-  `tests/test_phase11_hardening.py`).
-- Indexes cover the read paths: pending queue ordering, per-item audit history,
-  follow-up status scans, and feedback lookup.
+| Concern | Implementation |
+| --- | --- |
+| URL handling | `app/core/database.py` accepts `sqlite:///` and `postgresql://`/`postgres://`; relative SQLite paths resolve against the repository root. |
+| Driver and pooling | `backend/requirements-postgres.txt` (`psycopg[binary]`, `psycopg-pool`); one lazily opened `ConnectionPool` per process with reconnect-on-checkout. |
+| SQL dialect | Persistence modules use bound `?` parameters; the PostgreSQL adapter translates placeholders. Upserts use `ON CONFLICT`; there are no `INSERT OR REPLACE`, `INSERT OR IGNORE`, or temporary-table statements left. |
+| Schema | `app/core/migrations.py` is a versioned, recorded, idempotent migration runner shared verbatim by both backends. Migration 1 is additive; `ALTER TABLE ... ADD COLUMN` statements are guarded by a live `column_exists` check. |
+| Partial unique index | `uq_workflow_feedback_idem ON workflow_feedback(idempotency_key) WHERE idempotency_key IS NOT NULL` is supported natively by both engines. |
+| Transactions | `begin_write()` issues `BEGIN IMMEDIATE` on SQLite only. On PostgreSQL, `lock_rows()` appends `FOR UPDATE`, so the state read and the write are one serialized cycle. |
+| Type/row access | `PostgresConnection`/`PostgresRow` preserve the sqlite3-style `fetchone()`/`fetchall()`/name access the persistence modules already use. |
 
-## What must change for PostgreSQL
+## Verification status
 
-| SQLite construct | Where | PostgreSQL equivalent |
-| --- | --- | --- |
-| `PRAGMA foreign_keys` / `busy_timeout` | `core/database.py`, `services/workflow.py` | Remove; set `idle_in_transaction_session_timeout` and rely on server-side locking. |
-| `INSERT OR IGNORE` | `services/workflow.py` (`ensure_workflow_items`) | `INSERT ... ON CONFLICT DO NOTHING` |
-| `INSERT OR REPLACE` | `core/database.py`, unit backfill | `INSERT ... ON CONFLICT (key) DO UPDATE` (REPLACE deletes+reinserts, which breaks FKs) |
-| `CREATE UNIQUE INDEX ... WHERE idempotency_key IS NOT NULL` | feedback idempotency | Supported natively (partial unique index) — no change. |
-| `CREATE TEMP TABLE _personnel_units` | unit backfill | Use `ON CONFLICT` + a CTE, or a real staging table. |
-| `BEGIN IMMEDIATE` | transition serialization | Not needed: `SELECT ... FOR UPDATE` inside the transaction gives the same guarantee. |
-| `PRAGMA table_info` + `ALTER TABLE ADD COLUMN` | `_ensure_column` migrations | Use a real migration tool (Alembic). Do not keep ad-hoc migration code. |
-| `sqlite:///...` URL parsing | `resolve_sqlite_url` | Accept `postgresql://` URLs via SQLAlchemy Core or asyncpg; keep the two persistence modules as the only call sites. |
+- **SQLite:** full local suite, lifecycle scripts, acceptance API, and the
+  scripted backup/restore drill (see `docs/PRODUCTION_READINESS.md`).
+- **PostgreSQL, live:** `backend/tests/test_postgres_live.py` drops and
+  recreates the `public` schema on a **disposable** database, then checks
+  migrations, the partial unique index, a real workflow transition, and two
+  concurrent transitions racing on the same row (exactly one must win, and
+  exactly one transition event must be written). Executed on 2026-10-19 against
+  a disposable `postgres:16` container started with Docker: **3 passed, exit 0**.
+  The `postgres-integration` job in `.github/workflows/ci.yml` runs the same
+  module against a fresh `postgres:16` service container; that CI job itself
+  was not executed by GitHub Actions in this run.
+- **Default suite:** the module is skipped when `FORTIFY_TEST_POSTGRES_URL` is
+  unset, which is why the normal Windows local run reports 332 collected:
+  328 passed, 4 skipped (the 3 PostgreSQL tests plus the symlink-containment
+  test, skipped only where Windows denies symlink creation). The PostgreSQL
+  skips were separately executed against the disposable server and passed.
+  The full 328-test suite was not re-run with every test pointed at PostgreSQL;
+  the live module covers the store contract, not every dashboard/workflow test.
 
-## Migration steps
+## What remains
 
-1. Introduce SQLAlchemy Core with two URL backends (SQLite stays the default so
-   CI and the demo remain reproducible).
-2. Port the five workflow tables to Alembic migrations; keep the existing
-   schema column-for-column (it is already normal and indexed).
-3. Replace the four dialect-specific statements listed above.
-4. Re-run the workflow lifecycle suite (`scripts/verify_workflow_lifecycle.py`)
-   against both backends; the assertions are dialect-neutral today and must
-   stay that way.
-5. Load-test the transition path with two concurrent writers to replace
-   `BEGIN IMMEDIATE` with `SELECT ... FOR UPDATE` confidently.
+| Gap | Why it matters |
+| --- | --- |
+| Alembic or an equivalent migration tool | The in-repo runner is forward-only and deliberately small. It has no downgrade path; a destructive migration must not ship without a tested rollback. |
+| Connection and transaction tuning | `idle_in_transaction_session_timeout`, statement timeouts, pool sizing under departmental load, and query-plan review are not measured. |
+| Row-level security | Not implemented; authorization is application-enforced. |
+| Backups, PITR, replication, failover | Application code cannot supply these. See `docs/BACKUP_RECOVERY.md`; the backup drill's PostgreSQL mode shells out to Docker and is not production tooling. |
+| Multi-replica testing | The row-lock test covers one racing pair, not a departmental load profile. |
+| Full dual-dialect suite | The live module covers the store contract, not every dashboard/workflow test. |
 
 ## What this project explicitly does NOT claim
 
-- No PostgreSQL driver is shipped or configured.
-- No dual-dialect test matrix exists.
-- The concurrency guarantees stated above are single-host SQLite guarantees.
-- Nothing in the README or dashboard should be read as "PostgreSQL ready" in
-  the tested sense; it is *migration-path ready*.
+- No PostgreSQL deployment is running or configured by this repository.
+- Live PostgreSQL coverage is limited to the disposable integration module; it
+  is not a departmental deployment or a full dual-dialect suite.
+- PostgreSQL performance, failover, backup, and multi-replica behaviour are
+  unmeasured.
+- A green default test run is not evidence about PostgreSQL; only the live
+  module is.

@@ -259,3 +259,44 @@ jobs:
             artifacts/model_validity/
           retention-days: 7
           if-no-files-found: error
+
+  postgres-integration:
+    name: PostgreSQL 16 integration (disposable service)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: fortify
+          POSTGRES_PASSWORD: fortify_ci_only
+          POSTGRES_DB: fortify_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U fortify -d fortify_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-postgres.txt
+
+      - name: Install pinned dependencies (base + PostgreSQL extras)
+        run: pip install -r backend/requirements.txt -r backend/requirements-postgres.txt
+
+      - name: Live schema, transition and row-lock checks
+        # The database is created by the service container for this job only and
+        # is destroyed with the runner. The test drops/recreates the public
+        # schema, so it must never point at a shared server.
+        env:
+          FORTIFY_TEST_POSTGRES_URL: postgresql://fortify:fortify_ci_only@localhost:5432/fortify_ci
+          FORTIFY_DATABASE_URL: postgresql://fortify:fortify_ci_only@localhost:5432/fortify_ci
+        run: pytest backend/tests/test_postgres_live.py -q

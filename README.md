@@ -95,7 +95,8 @@ The offline pipeline is separate from request serving:
 ```text
 scripts/build_all.py
   generate_synthetic_data → build_features → build_baselines → train_model
-  → build_phase5_risk_layer → build_interventions → build_feasibility → prepare_demo
+  → build_phase5_risk_layer → build_review_queue → build_interventions
+  → build_feasibility → prepare_demo
 ```
 
 ML never imports presentation code, and the API never trains or mutates models.
@@ -119,7 +120,7 @@ FORTIFY/
 │   │   ├── ml/                    # features, baselines, model, decisions, policy, feasibility
 │   │   ├── security/              # rbac, crypto, tokenization, audit chain, trust boundary
 │   │   └── services/              # workflow state machine + persistence
-│   └── tests/                     # 103 tests
+│   └── tests/                     # 332 backend tests (+3 live-PostgreSQL variants, opt-in)
 ├── frontend/                      # React + Vite + TypeScript
 ├── data/
 │   ├── schemas/                   # formal JSON schemas (tracked)
@@ -130,7 +131,7 @@ FORTIFY/
 ```
 
 **Generated data, models, and `frontend/dist/` are intentionally not in version control.** They are
-~375 MB of reproducible output. A fresh clone rebuilds them with one command (see below).
+~448 MB of reproducible output. A fresh clone rebuilds them with one command (see below).
 
 ---
 
@@ -153,7 +154,7 @@ generated files.
 # 1. Backend dependencies (pinned)
 pip install -r backend/requirements.txt
 
-# 2. Generate the demo environment — REQUIRED on a fresh clone (~7 minutes, ~375 MB)
+# 2. Generate the demo environment — REQUIRED on a fresh clone (~7 minutes, ~448 MB)
 #    Without it the API still starts, but data endpoints return HTTP 503.
 python scripts/build_all.py
 
@@ -164,7 +165,7 @@ python -m uvicorn app.main:app --app-dir backend --port 8000
 
 # 4. Start the frontend (in a second terminal)
 cd frontend
-npm install
+npm ci
 npm run dev
 ```
 
@@ -199,7 +200,7 @@ your container runtime. The `.env.example` files document the names; copying one
 |---|---|---|
 | `FORTIFY_DATABASE_URL` | `sqlite:///./backend/fortify.db` | SQLite location. Relative paths resolve against the repo root, not the CWD. |
 | `FORTIFY_CORS_ORIGINS` | `http://localhost:5173` | Comma-separated allowed browser origins. |
-| `FORTIFY_AUTH_MODE` | `demo` | `demo` = header trust; `production` = refuses to start until a real OIDC authenticator is configured. |
+| `FORTIFY_AUTH_MODE` | `demo` | `demo` = header trust; `production` = validates bearer tokens against the configured OIDC issuer/JWKS and refuses to start if that configuration is incomplete. |
 | `FORTIFY_DEMO_UNIT_SCOPE` | `demo:all-units` | Object-level scope for the unauthenticated demo build: a comma-separated list of real unit ids, or the named `demo:all-units` permission. Empty or malformed denies person-level access. Never honoured for a verified identity, never honoured in `production`. |
 | `FORTIFY_DATA_DIR` | `<repo>/data/generated` | Where generated CSVs are read from. |
 | `FORTIFY_RUNTIME_DIR` | `<repo>/data/runtime` | Runtime state directory (DB, audit log). |
@@ -259,8 +260,9 @@ This starts three services:
 | `fortify-backend` | 8000 | FastAPI |
 | `fortify-frontend` | 5173 | nginx serving the SPA and proxying `/api` + `/health` |
 
-Open **http://localhost:5173**. Both images run as an unprivileged user (`uid 10001`) and write only
-to mounted volumes; no generated data is baked into either image.
+Open **http://localhost:5173**. The backend image runs as an unprivileged user (`uid 10001`);
+the frontend is the stock nginx image serving the built SPA. Neither image bakes in generated
+data; both read only from mounted volumes.
 
 ```bash
 docker compose down -v      # stop and remove volumes
@@ -301,18 +303,25 @@ volume, no autoscaling, no TLS by default, and no authentication.
 ## Tests and validators
 
 ```bash
-pytest -q                                   # 273 collected: 271 pass / 2 skip after a
-                                            # lifecycle run; 269 pass / 4 skip on a
-                                            # pristine demo store (see note below)
+pytest -q                                   # 332 collected: 328 passed, 4 skipped
+                                            # on a freshly materialised demo store
+                                            # (measured 2026-10-19, 112.6 s,
+                                            # Windows/Python 3.13). 3 skips are
+                                            # live-PostgreSQL tests that require
+                                            # FORTIFY_TEST_POSTGRES_URL; the 4th is
+                                            # the symlink-containment test, which
+                                            # skips only where Windows denies
+                                            # symlink creation (it runs on Linux)
 cd frontend && npm run build                # TypeScript check + production build
 ```
 
-Two tests are state-dependent by design: one contract test needs a case that
-already has feedback recorded, and one red-team attack needs a support-completed
-case. On a freshly materialised demo store every case is still `NEW`, so those
-two skip as well - 4 skips instead of 2. A skip is reported as NOT EXECUTED, not
-as a pass; run `python scripts/verify_workflow_lifecycle.py` against a live
-server first and both find their precondition.
+Tests that need a non-`NEW` case now build it through the real transition
+endpoints instead of skipping, so a pristine store runs the whole suite. A skip
+is reported as NOT EXECUTED, never as a pass; the red-team report distinguishes
+PASS, FAIL, and NOT EXECUTED explicitly. Note the side effect: the suite drives
+demo cases through the state machine, so it reduces the number of open cases a
+subsequent UI session shows - rebuild or use a separate runtime for a pristine
+demo.
 
 The suite is self-contained (it builds its own fixtures in `tmp_path`), but 30 integration tests read
 the generated artifacts — so run `python scripts/build_all.py` at least once in the working
@@ -353,12 +362,20 @@ Both honor `FORTIFY_VERIFY_URL` (default `http://localhost:8000`) and exit non-z
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every push and pull request to
 `main`:
 
-1. **frontend-build** — `npm ci` → `npm run build` (includes the TypeScript check).
-2. **backend-verify** — pinned install → `scripts/build_all.py` (regenerates the seed-42
-   environment) → `pytest -q` → all 14 phase validators → uploads the regenerated reports as a
-   build artifact.
+1. **secret-scan** — tracked-file patterns plus a full-history Gitleaks scan.
+2. **docker-build** — builds both images and checks the backend runs as `uid 10001` and that
+   neither image contains generated CSVs or `node_modules`.
+3. **frontend-build** — `npm ci` → `npm run build` (includes the TypeScript check).
+4. **backend-verify** — pinned install → `scripts/build_all.py` (regenerates the seed-42
+   environment) → `pytest -q` → all 14 phase validators → validity and alert-burden probes →
+   uploads the regenerated reports as a build artifact.
+5. **postgres-integration** — runs `backend/tests/test_postgres_live.py` against a disposable
+   `postgres:16` service.
 
-CI starts from a clean checkout and never depends on local developer files.
+CI starts from a clean checkout and never depends on local developer files. The
+`postgres-integration` job is defined in the workflow but has **not been observed running on
+GitHub Actions** from this environment; the live checks it runs passed locally against a
+disposable PostgreSQL 16 server on 2026-10-19.
 
 ---
 
@@ -426,6 +443,11 @@ out-of-distribution families. The honest summary (full evidence:
 - Decision: the model is used as a **ranking signal inside the bounded queue**,
   never as an autonomous classifier. The governance properties hold even if
   the model were uninformative.
+- **Demo generator remains `legacy` for this release.** It is the mechanism
+  behind the shipped Phase 12 hero case, the 183-case queue, and every demo
+  artifact. The `latent` generator is benchmark-only: switching the demo
+  without regenerating and re-checking thresholds, review burden, explanations,
+  reproducibility and the UI would invalidate the prepared walkthrough.
 
 ## Authentication modes
 
@@ -433,10 +455,11 @@ out-of-distribution families. The honest summary (full evidence:
 
 - `demo` (default) — header trust, labelled unauthenticated everywhere it
   surfaces. For the demonstration environment only.
-- `production` — **fails closed at startup** until a real identity-provider
-  authenticator is implemented and registered
-  (`app/security/principal.build_authenticator`). There is no mode in which
-  production credentials are simulated.
+- `production` — **fails closed at startup** unless the OIDC/JWKS bearer
+  adapter is fully configured (`FORTIFY_OIDC_ISSUER`, `FORTIFY_OIDC_AUDIENCE`,
+  `FORTIFY_OIDC_JWKS_URI`). The adapter is implemented and tested with locally
+  generated signing keys; a real department IdP round trip is not verified.
+  There is no mode in which production credentials are simulated.
 
 ## Limitations
 
@@ -445,9 +468,12 @@ These are real and deliberate; none are hidden.
 - **Synthetic data only.** No real government, personnel, or departmental data is used anywhere.
 - **No real-world model validation.** Reported metrics (test ROC AUC ≈ 0.76) are prototype
   measurements on synthetic data. They are not clinical, operational, or externally validated.
-  On this synthetic data the trained model performs no better than a two-variable operational
-  rule at a comparable flag volume; the model's only demonstrated advantage is ranking quality
-  (ROC AUC), not decision quality at the deployed operating point. See
+  On the shipped legacy demo generator the fitted model performs no better than a two-variable
+  operational rule at any review capacity. On the benchmark-only latent generator it is 2–4 pp
+  more precise than the rule at the 1–2% capacities that match real review budgets, but its
+  ROC-AUC is lower than the hand-weighted temporal score's: the demonstrated advantage is
+  ranking quality at the top of the list, not decision quality at the deployed threshold. The
+  model is used as a ranking signal inside the bounded human-owned queue. See
   `artifacts/model_validity/model_validity_report.json` for the full comparison.
 - **Sparse, voluntary target.** The supervised label depends on people voluntarily submitting a
   wellness self-report; most person-days are unlabeled. Missing wellness is *never* treated as
@@ -455,12 +481,22 @@ These are real and deliberate; none are hidden.
 - **Explanations are associative, not causal.** Each factor states the value, its reference, the
   window, and the rule that admitted it — and only adverse changes are shown. They describe
   operational factors that accompany a higher predicted signal, nothing more.
-- **No authentication.** The API trusts caller-supplied headers. The authentication boundary is
-  isolated in `app/security/principal.py` behind a single `Authenticator` interface so a real
-  OIDC integration replaces one class without touching authorization — but it is not implemented.
-  Deploy only on a trusted network.
-- **SQLite and generated files.** Prototype persistence only; the PostgreSQL migration path is
-  documented, not implemented ([docs/POSTGRES_MIGRATION.md](docs/POSTGRES_MIGRATION.md)).
+- **Demo authentication by trusted headers; OIDC adapter not IdP-verified.** The default
+  `demo` mode trusts caller-supplied role/purpose headers. A relying-party OIDC/JWKS
+  authenticator is implemented in `backend/app/security/oidc.py` and exercised with locally
+  generated signing keys (`backend/tests/test_oidc.py`); production mode fails closed until
+  `FORTIFY_OIDC_ISSUER`, `FORTIFY_OIDC_AUDIENCE` and `FORTIFY_OIDC_JWKS_URI` are configured.
+  A real department IdP round trip, user provisioning, MFA/session/logout lifecycle and the
+  official claim policy are **not verified**. Demo mode is for a trusted network only.
+- **SQLite by default; PostgreSQL path implemented and live-tested, not production-deployed.** The demo uses
+  SQLite. `FORTIFY_DATABASE_URL` also accepts `postgresql://`, with a psycopg pool,
+  dialect-neutral workflow SQL, versioned migrations and `SELECT ... FOR UPDATE` serialization
+  (`backend/requirements-postgres.txt`). The opt-in live integration module ran against a
+  disposable `postgres:16` container on 2026-10-19: **3 passed** (migrations, partial unique
+  index, workflow transition, concurrent row-lock serialization). A disposable PostgreSQL 16
+  integration job is also defined in CI. This is not a departmental deployment: hosting,
+  backups/PITR/failover, tuning and a full dual-dialect suite remain. See
+  [docs/POSTGRES_MIGRATION.md](docs/POSTGRES_MIGRATION.md).
 - **No hardware-backed security.** No TEE, remote attestation, HSM, or secret-management service.
 - **No intervention simulator.** Phase 6/7 provide deterministic action mapping and operational
   feasibility — not numeric projected-strain estimates.
@@ -468,12 +504,14 @@ These are real and deliberate; none are hidden.
 
 ## What production would require
 
-Not implemented here, and deliberately not claimed: a real identity provider with federation (the
-`Authenticator` interface in `app/security/principal.py` is the seam); a managed secret store or
-HSM; confidential computing with remote attestation; PostgreSQL or an equivalent managed database;
-per-field encryption at rest with key rotation; centrally anchored tamper-evident logging; field-level
-authorization tied to identity; a distributed rate limiter / gateway; and a formal
-clinical/occupational-safety review of any welfare inference.
+Not implemented here, and deliberately not claimed: a real department identity-provider round
+trip, provisioning and session/logout lifecycle (the OIDC adapter and `Authenticator` seam exist;
+the IdP side is departmental); a managed secret store or HSM; confidential computing with remote
+attestation; a managed PostgreSQL deployment with tested backups, failover and PITR (the
+application-side path exists, the operation does not); per-field encryption at rest with key
+rotation; centrally anchored tamper-evident logging; field-level authorization tied to identity;
+a distributed rate limiter / gateway; and a formal clinical/occupational-safety review of any
+welfare inference.
 
 ---
 
@@ -522,13 +560,12 @@ Docker daemon.
 | [docs/POSTGRES_MIGRATION.md](docs/POSTGRES_MIGRATION.md) | SQLite→PostgreSQL path: what changes, what is verified, what is not claimed |
 | [docs/MODEL_LINEAGE.md](docs/MODEL_LINEAGE.md) | Stage-by-stage data/model lineage, generator forensics, benchmark evidence, architecture decision |
 | [docs/PRODUCTION_READINESS.md](docs/PRODUCTION_READINESS.md) | Area-by-area readiness matrix with verification evidence and blockers |
-| [docs/BACKUP_RECOVERY.md](docs/BACKUP_RECOVERY.md) | Backup, retention, and recovery requirements (requirements only, nothing implemented) |
+| [docs/BACKUP_RECOVERY.md](docs/BACKUP_RECOVERY.md) | Backup/retention/recovery requirements plus the scripted SQLite restore drill; scheduling, off-site copies and PostgreSQL recovery are not implemented |
 | [ROADMAP.md](ROADMAP.md) | Phase sequence and completion status |
 | [TODO.md](TODO.md) | Remaining limitations |
 | [DEMO_SCENARIO.md](DEMO_SCENARIO.md) | Demonstration storyline |
 | [docs/DEMO_RUNBOOK.md](docs/DEMO_RUNBOOK.md) | Demonstration operator guide |
 | [deploy/k8s/README.md](deploy/k8s/README.md) | Kubernetes deployment guide |
-| [data/generated/FEATURE_CATALOG.md](data/generated/FEATURE_CATALOG.md) | Feature definitions (generated) |
 
 ## License
 

@@ -227,9 +227,11 @@ class TestOptimisticConcurrencyContract:
 class TestIdempotencyContract:
     def test_feedback_honours_idempotency_key_header(self) -> None:
         """The same Idempotency-Key must not create a second record."""
-        from app.services.workflow import get_item, list_items
+        from app.services.workflow import get_item, list_items, transition_item
 
-        # Find a case with a support event but no feedback yet.
+        # Find a case with a support event but no feedback yet. A freshly
+        # materialized store has none, so drive one through the real state
+        # machine rather than skipping the only idempotency assertion.
         candidate = None
         for item in list_items(pending_only=False, limit=200, unit_scope=_SCRIPT_SCOPE):
             detail = get_item(item["workflow_item_id"], unit_scope=_SCRIPT_SCOPE)
@@ -237,7 +239,16 @@ class TestIdempotencyContract:
                 candidate = detail
                 break
         if candidate is None:
-            pytest.skip("no feedback-eligible case available")
+            pending = list_items(pending_only=True, limit=50, unit_scope=_SCRIPT_SCOPE)
+            seed = next((i for i in pending if i["workflow_state"] == "NEW"), None)
+            if seed is None:
+                pytest.skip("no pending workflow items to seed a support completion")
+            item_id = seed["workflow_item_id"]
+            for new_state in ("ACKNOWLEDGED", "IN_REVIEW", "SUPPORT_PLANNED", "SUPPORT_COMPLETED"):
+                transition_item(item_id, new_state=new_state, actor_role="WELFARE_OFFICER",
+                                purpose="WELFARE_SUPPORT", reason_code="contract-test-seed",
+                                unit_scope=_SCRIPT_SCOPE)
+            candidate = get_item(item_id, unit_scope=_SCRIPT_SCOPE)
         item_id = candidate["workflow_item_id"]
         key = f"contract-test-{item_id}"
         with TestClient(app) as client:

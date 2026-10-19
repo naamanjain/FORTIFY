@@ -10,7 +10,7 @@ Scenarios:
   A  Health endpoint responds 200 with the FORTIFY service payload.
   B  Welfare officer reads the aggregate dashboard overview.
   C  Commander reads aggregate unit summaries (aggregate-first, no person list).
-  D  Welfare officer opens an individual person profile (P-0002 hero case).
+  D  Welfare officer opens the prepared hero person profile (from the demo manifest).
   E  Commander is DENIED individual person detail (aggregate-only role).
   F  Welfare officer performs audited workflow transitions (non-hero item).
   G  Auditor reads the audit view with a valid hash chain.
@@ -31,11 +31,24 @@ from __future__ import annotations
 import json
 import os
 import sys
+from pathlib import Path
 from typing import Any
 
 import httpx
 
 BASE_URL = os.getenv("FORTIFY_VERIFY_URL", "http://localhost:8000")
+
+
+def _hero_person() -> str:
+    """Use the prepared hero, so acceptance does not drift from the demo."""
+    manifest = Path(__file__).resolve().parents[1] / "artifacts" / "phase12" / "demo_manifest.json"
+    try:
+        return str(json.loads(manifest.read_text(encoding="utf-8"))["hero_case"]["person_id"])
+    except (OSError, KeyError, TypeError, ValueError):
+        return "P-0002"
+
+
+HERO_PERSON = _hero_person()
 
 WO, WS = "WELFARE_OFFICER", "WELFARE_SUPPORT"
 CMD, AGG = "COMMANDER", "AGGREGATE_OPERATIONS"
@@ -112,22 +125,22 @@ def scenario_c() -> None:
         body = r.json()
         payloads.append(body)
         text = json.dumps(body)
-        ok = "P-0002" not in text and len(scan_forbidden(body)) == 0
+        ok = HERO_PERSON not in text and len(scan_forbidden(body)) == 0
     check("C  commander unit aggregates (aggregate-first)", ok, f"status={r.status_code}")
 
 
 def scenario_d() -> None:
-    r = get("/api/dashboard/person/P-0002", WO, WS)
+    r = get(f"/api/dashboard/person/{HERO_PERSON}", WO, WS)
     ok = r.status_code == 200
     if ok:
         body = r.json()
         payloads.append(body)
         ok = len(scan_forbidden(body)) == 0
-    check("D  welfare person detail P-0002 (WO+WS)", ok, f"status={r.status_code}")
+    check(f"D  welfare person detail {HERO_PERSON} (WO+WS)", ok, f"status={r.status_code}")
 
 
 def scenario_e() -> None:
-    r = get("/api/dashboard/person/P-0002", CMD, AGG)
+    r = get(f"/api/dashboard/person/{HERO_PERSON}", CMD, AGG)
     check("E  commander denied person detail", r.status_code == 403, f"status={r.status_code}")
 
 
@@ -139,7 +152,7 @@ def scenario_f() -> None:
     items = r.json().get("items", [])
     payloads.append(r.json())
     target = next(
-        (i for i in items if i.get("person_id") != "P-0002" and i.get("workflow_state") == "NEW"),
+        (i for i in items if i.get("person_id") != HERO_PERSON and i.get("workflow_state") == "NEW"),
         None,
     )
     if target is None:
@@ -191,7 +204,7 @@ def scenario_h() -> None:
 
 
 def scenario_i() -> None:
-    r = get("/api/dashboard/person/P-0002", AUD, AUDIT)
+    r = get(f"/api/dashboard/person/{HERO_PERSON}", AUD, AUDIT)
     check("I  auditor denied individual welfare data", r.status_code == 403, f"status={r.status_code}")
 
 

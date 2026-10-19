@@ -203,8 +203,8 @@ Artifacts: `artifacts/phase4/fortify_phase4_logistic_regression.joblib`, `artifa
 - Optional wellness responses are synthetic and not clinically validated.
 - Phase 4 target availability depends on voluntary future observations, so many person-days are unlabeled for supervised training.
 - The Phase 4 model is a prototype predictive baseline and is not externally validated or clinically calibrated.
-- Phase 5 explainability and uncertainty work is not implemented.
-- No intervention simulator, operational constraint engine, production authentication, or hardware-backed TEE is implemented.
+- Phase 5 structured explanations are implemented (`app/ml/explanations.py`, `explanations.jsonl`, served for flagged cases and covered by fidelity tests). Numeric uncertainty/confidence intervals are not implemented or presented; calibrated probabilities are point estimates.
+- No intervention simulator, operational constraint engine, verified departmental identity-provider integration, or hardware-backed TEE is implemented.
 
 ## Important decisions
 - SQLite remains the prototype database.
@@ -251,7 +251,7 @@ pytest -q
 ## Phase 5 — Risk Decision Layer
 Phase 5 converts the Phase 4 probability output into a validation-locked operational/welfare early-warning signal. The existing Phase 4 Logistic Regression and `risk_predictions.csv` are preserved.
 
-The Phase 5 decision layer applies Platt calibration fitted on validation predictions only, evaluates candidate thresholds on validation data, and locks the highest-validation-F1 threshold meeting a minimum 0.55 validation precision. The selected threshold is 0.45 for the current synthetic dataset. Risk bands are deterministic: LOW < 0.25, MODERATE 0.25–<0.50, HIGH >= 0.50. These are operational/welfare monitoring signals, not clinical categories.
+The Phase 5 decision layer applies Platt calibration fitted on validation predictions only and selects the candidate threshold with the highest F1 on the **most recent half** of the validation window among thresholds meeting the configured validation-precision floor. The deployed threshold is **0.400** for the current synthetic dataset; the full-window policy would select 0.45. Both are recorded in `artifacts/phase5/calibration_report.json`. Risk bands are deterministic: LOW < 0.25, MODERATE 0.25–<0.50, HIGH >= 0.50. These are operational/welfare monitoring signals, not clinical categories.
 
 The frontend-consumable output is `data/generated/risk_decisions.csv`. It contains person ID, date, calibrated welfare-risk probability, risk band, threshold decision, threshold/model metadata, and non-clinical contributing operational signals. Raw wellness responses are not emitted.
 
@@ -345,7 +345,7 @@ Phase 11 remains a prototype hardening layer. It does not introduce production i
 
 Phase 12 adds a deterministic final-demonstration preparation layer on top of the completed Phase 9–11 product flow. It selects a reproducible synthetic hero case from the existing risk, intervention, and feasibility artifacts, exports a 22-day operational/risk timeline, records the workflow starting state without mutating it, and produces a machine-readable demonstration manifest plus readiness report. No raw voluntary wellness responses are included.
 
-Current prepared hero case: `P-0002` on `2026-02-25`. The case was selected deterministically because it ends with a HIGH operational/welfare signal, `PRIORITY_WELFARE_REVIEW`, and multiple existing feasibility constraints after the largest qualifying 21-day increase in model probability.
+Current prepared hero case: `P-0182` on `2026-01-28` (read it from `artifacts/phase12/demo_manifest.json`; it moves when the data is regenerated). The case was selected deterministically because it ends with a HIGH operational/welfare signal, `PRIORITY_WELFARE_REVIEW`, and multiple existing feasibility constraints after the largest qualifying 21-day increase in model probability.
 
 Phase 12 does not change Phase 4–11 decision semantics and does not execute workflow actions automatically. The final walkthrough remains human-led and uses synthetic demonstration data only.
 

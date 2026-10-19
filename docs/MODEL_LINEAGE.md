@@ -128,9 +128,9 @@ review indicator; **no automatic model change is triggered by drift.**
 
 | Measure | Value |
 |---|---|
-| Naive "case per threshold day" | 45,735 cases |
+| Naive "case per threshold day" | 45,744 cases |
 | After alert policy (persistence + suppression + budget) | **183 cases** |
-| Duplicate alerts prevented | 45,263 |
+| Duplicate alerts prevented | 45,272 |
 | Suppressed by daily budget (recorded, auditable) | 289 |
 | New cases per day | mean 3.8, max 25 (budget) |
 | Cases per person | mean 1.0, max 1 |
@@ -160,6 +160,14 @@ qualification.**
 - OPTION A (ML provides meaningful incremental value) is **not supported** by
   this evidence and is not claimed. OPTION C alone (rules only) would forfeit
   the consistent top-of-ranking advantage on the latent families.
+
+**Demo generator decision (2026-10-19):** the shipped demo remains on the
+**legacy** generator. It is the mechanism behind the prepared hero case, the
+183-case queue, and all Phase 12 artifacts. The latent generator is exercised
+in benchmarking only. Switching the demo would require a full regeneration,
+threshold re-selection review, alert-burden re-measurement, explanation-fidelity
+and UX re-checks; none of those were performed on a latent demo world, so the
+switch is deliberately not made in this release.
 
 ## 6. What would change this decision
 

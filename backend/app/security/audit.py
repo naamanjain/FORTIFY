@@ -133,7 +133,10 @@ class AuditLog:
                 )
             return from_env.encode("utf-8")
         if self._key_path.exists():
-            stored = self._key_path.read_bytes().strip()
+            # Read the raw key verbatim. The key is binary: stripping bytes
+            # would silently shorten a key that begins or ends with a
+            # whitespace value, breaking every later anchor verification.
+            stored = self._key_path.read_bytes()
             if stored:
                 return stored
         key = os.urandom(32)

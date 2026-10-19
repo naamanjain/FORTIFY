@@ -86,6 +86,87 @@ def test_audit_chain_is_fail_closed_when_tampered(tmp_path: Path) -> None:
     assert not log.verify_chain()
 
 
+def test_generated_audit_key_is_read_verbatim(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A key containing whitespace bytes must not be stripped on reload.
+
+    The key is binary. Reading it with ``.strip()`` shortened a generated key
+    that began or ended with a whitespace byte, so the anchor signature written
+    on the first append failed verification from the next read onward.
+    """
+    from app.security import audit as audit_module
+    from app.security.audit import AuditEvent, AuditLog
+
+    # Force the generated key to end with a byte .strip() removes.
+    monkeypatch.setattr(audit_module.os, "urandom", lambda size: b"k" * (size - 1) + b"\n")
+    path = tmp_path / "audit.jsonl"
+    log = AuditLog(path)
+    log.append(AuditEvent("ACCESS", "WELFARE_OFFICER", "WELFARE_SUPPORT", "ALLOWED",
+                          "resource", "2026-01-01T00:00:00Z", {}))
+    assert len(AuditLog(path)._key()) == 32
+    assert AuditLog(path).verify_chain()
+
+
+def test_mutations_recheck_scope_on_the_locked_row(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Feedback and follow-up writes cannot rely on an earlier scoped read.
+
+    The pre-read is deliberately bypassed here to model a case that moves units
+    (or a stale authorization) between the read and the write. Only the check
+    on the locked row inside the transaction can stop the write.
+    """
+    from app.security.rbac import UnitScope
+
+    db = tmp_path / "workflow.db"
+    prepare_db(db, monkeypatch)
+    monkeypatch.setattr(workflow, "_audit_path", lambda: tmp_path / "audit.jsonl")
+    item_id = workflow._workflow_id("P-0001", "2026-06-29")
+    for state in ("ACKNOWLEDGED", "IN_REVIEW", "SUPPORT_PLANNED", "SUPPORT_COMPLETED"):
+        workflow.transition_item(item_id, new_state=state, actor_role="WELFARE_OFFICER",
+                                 purpose="WELFARE_SUPPORT", reason_code="TEST",
+                                 unit_scope=_SCRIPT_SCOPE)
+    original_unit = workflow._personnel_unit_map()["P-0001"]
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE workflow_items SET unit_id='U-OTHER' WHERE workflow_item_id=?", (item_id,))
+
+    scope = UnitScope(units=frozenset({original_unit}), source="claims")
+    original_get_item = workflow.get_item
+    monkeypatch.setattr(workflow, "get_item",
+                        lambda wid, *, unit_scope=None: original_get_item(wid, unit_scope=_SCRIPT_SCOPE))
+    with pytest.raises(KeyError):
+        workflow.transition_item(item_id, new_state="FOLLOW_UP_SCHEDULED",
+                                 actor_role="WELFARE_OFFICER", purpose="WELFARE_SUPPORT",
+                                 reason_code="SCOPE-RECHECK", unit_scope=scope)
+    with pytest.raises(KeyError):
+        workflow.record_feedback(item_id, helpfulness=4, comment=None, follow_up_requested=False,
+                                 actor_role="WELFARE_OFFICER", purpose="WELFARE_SUPPORT",
+                                 unit_scope=scope)
+    with pytest.raises(KeyError):
+        workflow.schedule_followup(item_id, "2026-07-01T09:00:00+00:00",
+                                   actor_role="WELFARE_OFFICER", purpose="WELFARE_SUPPORT",
+                                   unit_scope=scope)
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT workflow_state FROM workflow_items WHERE workflow_item_id=?",
+                            (item_id,)).fetchone()[0] == "SUPPORT_COMPLETED"
+        assert conn.execute("SELECT COUNT(*) FROM workflow_feedback").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM workflow_followups").fetchone()[0] == 0
+
+
+def test_rows_without_unit_attribution_are_never_listed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Missing unit metadata cannot fall through an all-units query."""
+    from app.security.rbac import UnitScope
+
+    db = tmp_path / "workflow.db"
+    prepare_db(db, monkeypatch)
+    item_id = workflow._workflow_id("P-0001", "2026-06-29")
+    # Keep ensure_workflow_items from backfilling the unit from personnel.csv.
+    monkeypatch.setattr(workflow, "ensure_workflow_items", lambda: None)
+    monkeypatch.setattr(workflow, "_trend_lookup", lambda: {})
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE workflow_items SET unit_id=NULL WHERE workflow_item_id=?", (item_id,))
+    all_units = UnitScope(all_units=True, source="demo-all")
+    assert workflow.list_items(pending_only=True, limit=10, unit_scope=all_units) == []
+    assert workflow.get_item(item_id, unit_scope=all_units) is None
+
+
 def test_sqlite_foreign_key_hardening(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     db = tmp_path / "workflow.db"
     prepare_db(db, monkeypatch)

@@ -13,9 +13,11 @@ Exit code 0 when every check passes.
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import httpx
 
@@ -23,6 +25,17 @@ BASE_URL = os.getenv("FORTIFY_VERIFY_URL", "http://localhost:8000")
 WO, WS = "WELFARE_OFFICER", "WELFARE_SUPPORT"
 CMD, AGG = "COMMANDER", "AGGREGATE_OPERATIONS"
 AUD, AUDIT = "AUDITOR", "AUDIT"
+
+
+def _hero_person() -> str:
+    manifest = Path(__file__).resolve().parents[1] / "artifacts" / "phase12" / "demo_manifest.json"
+    try:
+        return str(json.loads(manifest.read_text(encoding="utf-8"))["hero_case"]["person_id"])
+    except (OSError, KeyError, TypeError, ValueError):
+        return "P-0002"
+
+
+HERO_PERSON = _hero_person()
 
 results: list[tuple[str, bool, str]] = []
 
@@ -52,7 +65,7 @@ def pick_target(states: set[str], min_state: str = "NEW") -> str | None:
     if r.status_code != 200:
         return None
     for item in r.json().get("items", []):
-        if item.get("person_id") != "P-0002" and item.get("workflow_state") == min_state:
+        if item.get("person_id") != HERO_PERSON and item.get("workflow_state") == min_state:
             return item["workflow_item_id"]
     return None
 

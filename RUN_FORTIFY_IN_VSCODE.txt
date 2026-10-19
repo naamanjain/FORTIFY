@@ -19,8 +19,11 @@ disciplinary system and it does not prove anything about a real person.
 Real departmental data is not present in this repository, and real-world
 predictive validity has NOT been demonstrated. See docs/PRODUCTION_READINESS.md.
 
-The prototype has NO real authentication. It trusts two request headers.
-Do not expose it to an untrusted network. (Security note at the end.)
+The default demo mode has NO real authentication. It trusts two request headers.
+Do not expose it to an untrusted network. A production OIDC/JWKS bearer adapter
+exists and is tested with locally generated keys, but a real department IdP
+round trip, provisioning, MFA/session/logout, and official claim policy are
+unverified. (Security note at the end.)
 
 --------------------------------------------------------------------------------
 0. PREREQUISITES
@@ -101,12 +104,14 @@ If activation fails with an "execution of scripts is disabled" /
 2b. Frontend dependencies
 --------------------------------------------------------------------------------
     cd frontend
-    npm install
+    npm ci
     cd ..
 
-`npm install` was not re-run here either (node_modules is already present and
-`npm run build` and `npm run dev` both work against it). It is the correct
-first-time command on a fresh clone.
+`npm ci` installs the exact dependency tree in the tracked
+`frontend/package-lock.json`; it is the correct first-time command on a fresh
+clone and was verified in a clean worktree on 2026-10-19 (`npm ci`, then
+`npm run build`, both exit 0). Use `npm install` only when you deliberately
+change `package.json`.
 
 --------------------------------------------------------------------------------
 2c. Generate the demo data and models  (REQUIRED on a fresh clone)
@@ -118,12 +123,13 @@ This is the deterministic pipeline: synthetic personnel and operational events
 recommendations -> feasibility -> review queue -> demo case seeding. Seed is
 pinned at 42, so the output is reproducible.
 
-  MEASURED ON THIS MACHINE: 421.4 s (7 min 1 s) when nothing else ran; 606.7 s
-  (10 min 7 s) when the test suite and Docker were competing for the same disk.
-  Exit code 0 both times, Python 3.13 / Windows.
-  Writes ~447 MB into data/generated/ (the largest single file is
+  MEASURED ON THIS MACHINE: 449.0 s (7 min 29 s) in a clean-tree reproduction
+  on 2026-10-19; 421.4 s in an earlier working-tree run; 606.7 s (10 min 7 s)
+  when the test suite and Docker were competing for the same disk. Exit code 0
+  in all runs, Python 3.13 / Windows.
+  Writes ~448 MB into data/generated/ (the largest single file is
   person_day_features_baseline.csv at ~204 MB) plus models and reports in
-  artifacts/. README quotes "~375 MB"; the measured figure is higher.
+  artifacts/. README quotes ~448 MB; this matches the latest measured build.
 
   Per-step, so you know where the time goes (measured, same run):
       generate_synthetic_data.py    19.7 s
@@ -140,13 +146,18 @@ This step is the slow one. It is NOT needed again unless you delete the
 generated files, change a pinned dependency version, or change the generator.
 Section 5 ("After first setup") does not repeat it.
 
-WARNING: build_all.py ends by re-running prepare_demo.py, which resets the demo
-workflow state. Any review decisions you made in the UI are discarded. Run it
-between demos, not during one.
+NOTE: build_all.py ends by re-running prepare_demo.py. That materializes any new
+alert-policy cases into the configured workflow store and rewrites the demo
+manifest; it does NOT reset the state of cases a human has already acted on.
+Untouched NEW cases that are no longer in the regenerated queue are pruned
+(rows with transition history, support events or feedback are permanent). If
+you want a pristine demo, use a separate database/runtime directory via
+FORTIFY_DATABASE_URL and FORTIFY_RUNTIME_DIR rather than deleting the live one.
 
-You will know it worked when the last line reads:
+You will know it worked when the last lines read something like (the seconds
+vary by machine and disk load):
 
-    PIPELINE COMPLETE in 421.4s
+    PIPELINE COMPLETE in 449.0s
     Next: start the backend (see README) and open the frontend.
 
 and you can see the files:
@@ -359,11 +370,17 @@ model.ready=True across 5 checks.
 6b. Test suite and validators (from repository root, backend not required)
 --------------------------------------------------------------------------------
     python -m pytest -q
-    # MEASURED ON THIS MACHINE (Windows, Python 3.13, 295 collected):
-    #   295 passed, 0 skipped, exit 0, ~87 s.
-    # Earlier in this audit the same suite reported 4 skips; those were
-    # precondition-dependent tests that now build what they need through the real
-    # endpoints instead of skipping. NOTE THE SIDE EFFECT: the red-team suite and
+    # MEASURED ON THIS MACHINE (Windows, Python 3.13, 332 collected):
+    #   328 passed, 4 skipped, exit 0, 112.6 s.
+    #   3 skips are live-PostgreSQL integration tests that require
+    #   FORTIFY_TEST_POSTGRES_URL and a running server; the 4th is the
+    #   ingestion symlink-containment test, skipped only because this Windows
+    #   user cannot create symlinks (it runs where symlinks are permitted).
+    #   A skip is NOT a pass.
+    #   The suite seeds every other precondition through the real transition
+    #   endpoints, including a support-completed case for the idempotency
+    #   contract and the red-team attack that needs one.
+    # NOTE THE SIDE EFFECT: the red-team suite and
     # verify_workflow_lifecycle.py drive demo cases through the state machine
     # (SUPPORT_COMPLETED, CLOSED, follow-ups completed), so running them reduces
     # the number of open cases the UI shows. Measured on the store after those
@@ -619,7 +636,7 @@ take down unrelated tooling.
 
     If it feels much slower than that, the cause is usually contention rather
     than the application:
-      * `python scripts\build_all.py` rewrites roughly 447 MB. Running the
+      * `python scripts\build_all.py` rewrites roughly 448 MB. Running the
         backend, the frontend, or a demo WHILE it regenerates is genuinely slow,
         and the data endpoints can even see half-written artifacts. Let it finish.
       * The full test suite, the validators, Docker builds and the pipeline all
@@ -629,7 +646,7 @@ take down unrelated tooling.
       * The first browser load pays Vite's on-demand transform of ~638 modules.
         Later loads are cached and fast; `npm run build` proves the production
         bundle is not affected.
-      * If this repository sits inside a OneDrive folder, syncing 447 MB of
+      * If this repository sits inside a OneDrive folder, syncing 448 MB of
         changed files will dominate disk I/O. Pausing OneDrive during a
         regeneration, or keeping the working copy outside the sync root, is the
         practical fix.
@@ -671,6 +688,15 @@ Stop and remove the stack:
 To also discard the demo data and database volumes:  docker compose down -v
 
 VERIFICATION STATUS - the container path WAS executed on this machine:
+  The full single `docker compose up --build` run below was recorded on
+  2026-10-16 with the then-current tree, i.e. BEFORE the model tolerance fix
+  committed on 2026-10-18. On 2026-10-19 the current tree was re-verified with
+  `docker compose -p fortify-release-verify`: all three images built (exit 0),
+  a fresh-volume pipeline container exited 0 in 466.7 s, backend and frontend
+  reached healthy, nginx served /, /health and the proxied API (401 without
+  credentials, 200 with welfare headers), and a 17 MiB ingest body was rejected
+  by nginx with 413. The isolated stack and its volumes were then removed.
+  The full single-command run was not repeated verbatim.
   * `docker build -f backend/Dockerfile  -t fortify-backend:local  .` -> exit 0,
     image 788 MB.
   * `docker build -f frontend/Dockerfile -t fortify-frontend:local frontend/`
@@ -702,10 +728,12 @@ VERIFICATION STATUS - the container path WAS executed on this machine:
 ================================================================================
 10. SECURITY NOTE - READ BEFORE YOU DEMO TO ANYONE OUTSIDE YOUR OWN MACHINE
 ================================================================================
-* The prototype authenticates nothing. It trusts the X-Fortify-Role and
+* The default demo mode authenticates nothing. It trusts the X-Fortify-Role and
   X-Fortify-Purpose request headers, and the frontend fills them from build-time
   environment variables. Anyone who can reach the port can set them to anything.
-  This is a demonstration convenience, NOT access control.
+  This is a demonstration convenience, NOT access control. FORTIFY_AUTH_MODE=
+  production requires OIDC bearer validation (implemented), but that path has
+  not been exercised against a real department identity provider.
 * Object-level unit scope IS enforced (see section 4) - but do not confuse the
   two. Scope decides WHICH units' people a caller may touch; it does not decide
   WHO the caller is. Because the role header is self-asserted, an attacker on the
@@ -714,9 +742,10 @@ VERIFICATION STATUS - the container path WAS executed on this machine:
   behind it is not. Never treat this as authorization for real personnel data.
 * The sidebar says "Not authenticated" and the Governance page reports the same.
   That label is accurate. Do not describe this build as authenticated.
-* FORTIFY_AUTH_MODE=production is designed to fail closed (the app refuses to
-  start) until a real OIDC authenticator is registered. There is no identity
-  provider in this repository and none was fabricated for this guide.
+* FORTIFY_AUTH_MODE=production fails closed without a configured issuer,
+  audience and JWKS. The OIDC/JWKS adapter is implemented and tested with local
+  keys, but no real identity provider has been connected, provisioned, or
+  exercised for MFA/session/logout in this repository.
 * Do not bind the dev server to 0.0.0.0, do not put it behind a public tunnel,
   and do not share it with the network during a demo. 127.0.0.1 is used
   throughout this file on purpose.

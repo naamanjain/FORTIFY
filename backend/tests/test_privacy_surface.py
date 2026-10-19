@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 
 import pytest
 from fastapi.testclient import TestClient
@@ -28,6 +29,15 @@ INFRA = {"X-Fortify-Role": "SYSTEM_ADMINISTRATOR", "X-Fortify-Purpose": "INFRAST
 
 WELLNESS_FIELDS = {"mood_score", "energy_score", "sleep_quality", "perceived_stress",
                    "workload_manageability", "support_request"}
+
+# Person identifiers are P-0001 style. A bare "P-0" substring also occurs in
+# support-event ids (SUP-0...), so match the whole identifier shape instead.
+PERSON_ID = re.compile(r"\bP-\d{3,}\b")
+
+
+def _assert_no_person_ids(value, context: str) -> None:
+    match = PERSON_ID.search(json.dumps(value))
+    assert match is None, f"{context} leaked a person identifier: {match.group(0) if match else ''}"
 
 
 def _all_payloads(value) -> list[dict]:
@@ -45,7 +55,7 @@ class TestPrivacySurfaceByRole:
         for path in ("/api/dashboard/overview", "/api/dashboard/units", "/api/dashboard/trend?days=14"):
             body = client.get(path, headers=AGGREGATE).json()
             text = json.dumps(body)
-            assert "P-0" not in text, f"{path} leaked a person identifier"
+            _assert_no_person_ids(body, path)
             assert "risk_probability" not in text, f"{path} leaked per-person scores"
 
     def test_auditor_receives_only_governance_data(self, client):
@@ -55,7 +65,7 @@ class TestPrivacySurfaceByRole:
         for payload in _all_payloads(body):
             assert not WELLNESS_FIELDS & set(payload.keys())
         # Personnel identifiers in audit details are redacted at read time.
-        assert "P-0" not in json.dumps(body)
+        _assert_no_person_ids(body, "/api/dashboard/audit")
 
     def test_welfare_officer_individual_data_is_purpose_appropriate(self, client):
         """EXPECTED: individual views may carry operational welfare signals but

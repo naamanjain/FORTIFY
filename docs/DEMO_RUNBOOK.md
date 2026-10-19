@@ -6,8 +6,12 @@ This runbook is the Phase 12 operator guide for demonstrating the completed FORT
 
 ## Prepared hero case
 
-- Person: `P-0002`
-- Demonstration date: `2026-02-25`
+Read these values from `artifacts/phase12/demo_manifest.json` before each
+demonstration; they move when the dataset is regenerated. Measured on the
+current build:
+
+- Person: `P-0182`
+- Demonstration date: `2026-01-28`
 - Ending operational/welfare signal: `HIGH`
 - Recommended action: `PRIORITY_WELFARE_REVIEW`
 - Feasibility: `CONSTRAINED`

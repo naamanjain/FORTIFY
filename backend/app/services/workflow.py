@@ -31,7 +31,10 @@ def _scope_predicate(scope: UnitScope | None, column: str = "unit_id") -> tuple[
     if scope is None:
         raise PermissionError(_MISSING_SCOPE)
     if scope.all_units:
-        return "", []
+        # UnitScope.allows() refuses a missing unit even under an explicit
+        # all-units grant, so the query must agree: an item without unit
+        # attribution is not listable and cannot be opened.
+        return " AND " + column + " IS NOT NULL AND TRIM(" + column + ") <> ''", []
     if not scope.units:
         return " AND 1 = 0", []
     units = sorted(scope.units)
@@ -358,7 +361,12 @@ def get_item(workflow_item_id: str, *, unit_scope: UnitScope | None = None) -> d
         if not unit_scope.allows(str(row["unit_id"]) if row["unit_id"] is not None else None):
             return None
         item = _row_to_dict(row)
-    item["history"] = get_history(workflow_item_id)
+    try:
+        item["history"] = get_history(workflow_item_id, unit_scope=unit_scope)
+    except KeyError:
+        # The row was removed or moved out of scope between this read and the
+        # history read. The case is no longer presentable, not a server error.
+        item["history"] = []
     item["support_event"] = get_support_event(workflow_item_id)
     item["feedback"] = get_feedback(workflow_item_id)
     item["followup"] = get_followup(workflow_item_id)
@@ -390,8 +398,24 @@ def open_case_id_for_person(person_id: str, unit_scope: UnitScope | None = None)
     return str(row[0]) if row else None
 
 
-def get_history(workflow_item_id: str) -> list[dict[str, Any]]:
+def get_history(workflow_item_id: str, *, unit_scope: UnitScope | None = None) -> list[dict[str, Any]]:
+    """Per-case transition history, scoped to the caller's units.
+
+    A governance caller may read the history of a case in its own units, not
+    every case by id. Unknown and out-of-scope ids raise the same not-found
+    error so the endpoint cannot be used to enumerate cases.
+    """
+    if unit_scope is None:
+        raise PermissionError(_MISSING_SCOPE)
     with _connection() as conn:
+        _as_rows(conn)
+        item = conn.execute(
+            "SELECT unit_id FROM workflow_items WHERE workflow_item_id = ?", (workflow_item_id,)
+        ).fetchone()
+        if item is None:
+            raise KeyError("Workflow item not found")
+        if not unit_scope.allows(str(item["unit_id"]) if item["unit_id"] is not None else None):
+            raise KeyError("Workflow item not found")
         rows = conn.execute("""SELECT event_id, workflow_item_id, person_id, recommendation_date,
             previous_state, new_state, actor_role, purpose, timestamp, reason_code, model_version,
             policy_version, feasibility_policy_version, workflow_policy_version
@@ -554,8 +578,15 @@ def record_feedback(workflow_item_id: str, *, helpfulness: int, comment: str | N
     now = datetime.now(timezone.utc).isoformat()
     fid = f"FB-{hashlib.sha256(f'{workflow_item_id}|{now}'.encode()).hexdigest()[:20]}"
     with _connection() as conn:
-        conn.execute("BEGIN IMMEDIATE")
+        begin_write(conn); _as_rows(conn)
         try:
+            # Re-check the locked row inside the write transaction: the scoped
+            # pre-read above is not authoritative if the case moved units since.
+            locked = lock_rows(conn, "SELECT * FROM workflow_items WHERE workflow_item_id=?", (workflow_item_id,))
+            row = locked[0] if isinstance(locked, list) else locked.fetchone() if hasattr(locked, "fetchone") else locked
+            if not row:
+                raise KeyError("Workflow item not found")
+            _check_row_scope(unit_scope, row)
             conn.execute(
                 "INSERT INTO workflow_feedback(feedback_id,workflow_item_id,support_event_id,person_id,helpfulness,comment,follow_up_requested,submitted_at,recorded_by_role,idempotency_key) VALUES (?,?,?,?,?,?,?,?,?,?)",
                 (fid, workflow_item_id, support_event_id, item["person_id"], helpfulness,
@@ -588,7 +619,15 @@ def schedule_followup(workflow_item_id: str, scheduled_for: str, actor_role: str
     if not support: raise ValueError("Follow-up requires a recorded support event.")
     now = datetime.now(timezone.utc).isoformat()
     with _connection() as conn:
-        conn.execute("BEGIN IMMEDIATE")
+        begin_write(conn); _as_rows(conn)
+        # Scope is re-checked on the locked row, for the same reason as a
+        # transition: a case that moved units after the pre-read must not be
+        # writable through the caller's stale authorization.
+        locked = lock_rows(conn, "SELECT * FROM workflow_items WHERE workflow_item_id=?", (workflow_item_id,))
+        row = locked[0] if isinstance(locked, list) else locked.fetchone() if hasattr(locked, "fetchone") else locked
+        if not row:
+            raise KeyError("Workflow item not found")
+        _check_row_scope(unit_scope, row)
         active = conn.execute("SELECT followup_id FROM workflow_followups WHERE workflow_item_id=? AND status IN ('SCHEDULED','DUE') ORDER BY last_updated_at DESC LIMIT 1", (workflow_item_id,)).fetchone()
         if active:
             followup_id = active[0]
@@ -662,7 +701,7 @@ def complete_followup(followup_id: str, actor_role: str, purpose: str,
     _require_welfare_actor(actor_role, purpose); ensure_workflow_items(); now=datetime.now(timezone.utc).isoformat()
     with _connection() as conn:
         _as_rows(conn)
-        conn.execute("BEGIN IMMEDIATE")
+        begin_write(conn)
         row=conn.execute("""SELECT f.status AS followup_status, f.person_id AS fu_person_id,
             w.workflow_item_id AS wi_id, w.workflow_state AS wi_state, w.recommendation_date AS wi_date,
             w.unit_id AS wi_unit_id,

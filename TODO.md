@@ -32,18 +32,22 @@ out of sync with the completed roadmap.
 - The supervised target depends on sparse voluntary wellness self-reports; most person-days are
   unlabeled for evaluation.
 - Explanations are associative operational signals, not causal explanations.
-- The operating threshold (0.45) and risk bands are synthetic-prototype tuning and require policy
-  review before any real-world use.
+- The operating threshold (0.40; full-window policy 0.45) and risk bands are synthetic-prototype
+  tuning and require policy review before any real-world use.
 
 **Security and identity**
-- There is no authentication: the API trusts `X-Fortify-Role` / `X-Fortify-Purpose` headers.
-  Trusted-network demonstration only.
-- No production identity provider / identity federation.
+- The default demo mode has no authentication: the API trusts `X-Fortify-Role` /
+  `X-Fortify-Purpose` headers. Trusted-network demonstration only. A production OIDC/JWKS bearer
+  adapter exists and is tested with locally generated keys; real department IdP round trip,
+  user provisioning, MFA/session/logout lifecycle, and official claim policy are unverified.
+- No production identity federation has been exercised against a real IdP.
 - No HSM-backed secret management, hardware-backed TEE, remote attestation, or hardware-backed key
   release — Phase 8 implements application-level controls and an explicit trust boundary only.
 
 **Platform**
-- Prototype SQLite persistence; production PostgreSQL migration is future work.
+- Prototype SQLite persistence by default; the PostgreSQL application path is implemented and
+  live-tested against a disposable server. A departmental PostgreSQL deployment, migrations at
+  scale, PITR/failover and operational tuning remain future work.
 - Dashboard reads regenerated CSV artifacts through read-only endpoints; a production data service
   is out of scope.
 - Follow-up scheduling is represented through workflow states; no calendar/reminder integration.

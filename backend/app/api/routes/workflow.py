@@ -165,7 +165,8 @@ def history(workflow_item_id: str, principal: Principal = FastAPIDepends(require
                 "privacy_note": PRIVACY_NOTE}
     if principal.purpose.value == "AUDIT":
         require_audit(principal, f"/api/workflow/{workflow_item_id}/history", AUDIT_PATH)
-        events = _run(lambda: get_history(workflow_item_id))
+        # Auditors are scoped too: governance access does not mean every case.
+        events = _run(lambda: get_history(workflow_item_id, unit_scope=unit_scope_for(principal)))
         redacted = [{key: value for key, value in event.items() if key != "person_id"} for event in events]
         return {"workflow_item_id": workflow_item_id, "events": redacted, "count": len(redacted),
                 "person_identifiers_redacted": True,
