@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import secrets
 from pathlib import Path
 
 import pytest
@@ -17,7 +18,7 @@ from backend.app.security import (
 )
 
 
-SECRET = "***REMOVED***"
+SECRET = secrets.token_hex(32)
 
 
 def test_deterministic_tokenization_and_identity_separation() -> None:
